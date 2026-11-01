@@ -1,0 +1,45 @@
+# Build and test on every push and pull request.
+#
+# Windows only: every tool that uses SourceKit runs on Windows and resolves content by Windows path.
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A newer push to the same branch makes the older run pointless.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build and test
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v7
+
+      # setup-dotnet v6 needs runner 2.327.1 or newer, which the GitHub hosted runners are well past.
+      # It matters only if this is ever pointed at a self hosted runner.
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Restore
+        run: dotnet restore SourceKit.slnx
+
+      # Warnings are errors here and nowhere else. The build is clean, so anything new is worth
+      # stopping for, and keeping it out of the csproj means a warning does not block someone
+      # mid-change on their own machine.
+      - name: Build
+        run: dotnet build SourceKit.slnx --configuration Release --no-restore -warnaserror
+
+      - name: Test
+        run: dotnet test SourceKit.slnx --configuration Release --no-build

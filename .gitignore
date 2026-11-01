@@ -1,0 +1,12 @@
+bin/
+obj/
+*.user
+*.suo
+.vs/
+.idea/
+
+# Maps and compile output used while testing. Large, and the maps are not ours to redistribute.
+*.bsp
+*.prt
+*.lin
+*.nav

@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- Readers for Source engine files, shared by Meshwright, Viswright and Compile Pal. A library
+         only: each tool publishes it inside its own self-contained executable. -->
+    <OutputType>Library</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <AssemblyName>SourceKit</AssemblyName>
+    <RootNamespace>SourceKit</RootNamespace>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <!-- Consumers trim their published executables; nothing here relies on reflection. -->
+    <IsTrimmable>true</IsTrimmable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="SharpCompress" Version="0.50.4" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- GameInfo.Parse takes text rather than a path, which is what makes it testable without a game
+         install, but it is not part of the library's surface. -->
+    <InternalsVisibleTo Include="SourceKit.Tests" />
+  </ItemGroup>
+
+</Project>

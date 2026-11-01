@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="SourceKit.Tests/SourceKit.Tests.csproj" />
+  <Project Path="SourceKit/SourceKit.csproj" />
+</Solution>
