@@ -36,6 +36,12 @@ namespace SourceKit
         /// <summary>Whether the header's flags mark this as usable as a static prop.</summary>
         public bool StaticProp { get; private set; }
 
+        /// <summary>The model's material names, without folder, in the order its texture table lists them.</summary>
+        public System.Collections.Generic.IReadOnlyList<string> TextureNames { get; private set; } = [];
+
+        /// <summary>The folders under materials/ the engine looks in for each texture name, in order.</summary>
+        public System.Collections.Generic.IReadOnlyList<string> TextureFolders { get; private set; } = [];
+
         /// <summary>STUDIOHDR_FLAGS_STATIC_PROP.</summary>
         private const int FlagStaticProp = 0x10;
 
@@ -66,6 +72,8 @@ namespace SourceKit
             ms.Seek(HullMinOffset + 24 + 24, SeekOrigin.Begin);
             model.StaticProp = (r.ReadInt32() & FlagStaticProp) != 0;
 
+            ReadTextures(bytes, model);
+
             // A model with no collision bounds at all - both corners zero - describes nothing, and
             // returning it as a valid degenerate box would place a point-sized solid at the origin.
             model.Valid = model.HullMax.X > model.HullMin.X
@@ -79,6 +87,49 @@ namespace SourceKit
         /// The collision bounds as twelve triangles, so a box-collided prop can join the same triangle
         /// soup as everything else rather than needing its own trace path.
         /// </summary>
+        /// <summary>
+        /// The texture table (numtextures and textureindex at 204, each entry 64 bytes starting with
+        /// the offset of its name from the entry) and the folder table (numcdtextures and
+        /// cdtextureindex at 212, offsets of strings from the start of the file). A table that does
+        /// not fit the file is ignored rather than read past its end.
+        /// </summary>
+        private static void ReadTextures(byte[] bytes, StudioModel model)
+        {
+            if (bytes.Length < 220)
+                return;
+            int count = BitConverter.ToInt32(bytes, 204), index = BitConverter.ToInt32(bytes, 208);
+            int folders = BitConverter.ToInt32(bytes, 212), folderIndex = BitConverter.ToInt32(bytes, 216);
+            if (count < 0 || count > 1024 || index < 0 || index + count * 64L > bytes.Length
+                || folders < 0 || folders > 1024 || folderIndex < 0 || folderIndex + folders * 4L > bytes.Length)
+                return;
+
+            var names = new System.Collections.Generic.List<string>(count);
+            for (int i = 0; i < count; i++)
+            {
+                int entry = index + i * 64;
+                string? name = ReadString(bytes, (long)entry + BitConverter.ToInt32(bytes, entry));
+                if (name != null) names.Add(name);
+            }
+            var paths = new System.Collections.Generic.List<string>(folders);
+            for (int i = 0; i < folders; i++)
+            {
+                string? folder = ReadString(bytes, BitConverter.ToInt32(bytes, folderIndex + i * 4));
+                if (folder != null) paths.Add(folder);
+            }
+            model.TextureNames = names;
+            model.TextureFolders = paths;
+        }
+
+        private static string? ReadString(byte[] bytes, long offset)
+        {
+            if (offset < 0 || offset >= bytes.Length)
+                return null;
+            int end = Array.IndexOf(bytes, (byte)0, (int)offset);
+            if (end < 0 || end - offset > 260)
+                return null;
+            return System.Text.Encoding.ASCII.GetString(bytes, (int)offset, end - (int)offset);
+        }
+
         public BspFile.Vector3[] AsTriangles()
         {
             if (!Valid) return [];

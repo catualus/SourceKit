@@ -53,6 +53,15 @@ namespace SourceKit
         /// <summary>How many func_areaportal and func_areaportalwindow entities the map has.</summary>
         public int AreaPortalEntityCount { get; }
 
+        /// <summary>
+        /// Every areaportal VBSP placed, by its portal number, with the two areas it joins. A portal that
+        /// VBSP could not place between two areas is not here.
+        /// </summary>
+        public IReadOnlyDictionary<int, (int AreaA, int AreaB)> AreaPortalLinks { get; private init; } = new Dictionary<int, (int, int)>();
+
+        /// <summary>The portal number VBSP gave each named areaportal entity.</summary>
+        public IReadOnlyDictionary<string, int> PortalNumbersByName { get; private init; } = new Dictionary<string, int>();
+
         private readonly byte[][] pvs;
 
         private BspVisibilityData(int clusters, byte[][] pvs, BspLeaf[] leaves, BspFace[] faces, ushort[] leafFaces,
@@ -136,7 +145,11 @@ namespace SourceKit
 
             return new BspVisibilityData(clusters, rows, leaves, faces, leafFaces,
                 lengths[LumpAreas] / 8, lengths[LumpAreaPortals] / 12,
-                portalNumbers.Count == 0 ? 0 : portalNumbers.Max(), portalNumbers.Count);
+                portalNumbers.Count == 0 ? 0 : portalNumbers.Max(), portalNumbers.Count)
+            {
+                AreaPortalLinks = ReadAreaPortalLinks(Lump(LumpAreas), Lump(LumpAreaPortals)),
+                PortalNumbersByName = PortalNumbersByTargetname(entities),
+            };
         }
 
         private static int[] ReadTexinfoFlags(byte[] bytes)
@@ -258,6 +271,52 @@ namespace SourceKit
                 rows[c] = row;
             }
             return (clusters, rows);
+        }
+
+        /// <summary>
+        /// Each area lists its portals (dareas_t: count and first index, 8 bytes) in the areaportal lump
+        /// (dareaportal_t, 12 bytes: portal key, the other area, clip vertex range, plane). A portal is
+        /// listed once from each side, which is what gives both of its areas.
+        /// </summary>
+        private static Dictionary<int, (int, int)> ReadAreaPortalLinks(byte[] areas, byte[] portals)
+        {
+            var links = new Dictionary<int, (int, int)>();
+            int portalCount = portals.Length / 12;
+            for (int area = 0; area < areas.Length / 8; area++)
+            {
+                int count = BitConverter.ToInt32(areas, area * 8), first = BitConverter.ToInt32(areas, area * 8 + 4);
+                if (count < 0 || first < 0 || first + count > portalCount)
+                    throw new InvalidDataException($"Area {area}'s portal list runs past the end of the areaportal lump.");
+                for (int i = first; i < first + count; i++)
+                {
+                    int key = BitConverter.ToUInt16(portals, i * 12);
+                    int other = BitConverter.ToUInt16(portals, i * 12 + 2);
+                    links[key] = (area, other);
+                }
+            }
+            return links;
+        }
+
+        private static Dictionary<string, int> PortalNumbersByTargetname(string entities)
+        {
+            var result = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            foreach (string block in entities.Split('}'))
+            {
+                string? name = KeyIn(block, "targetname"), number = KeyIn(block, "portalnumber");
+                if (name != null && number != null && int.TryParse(number, out int n))
+                    result[name] = n;
+            }
+            return result;
+        }
+
+        private static string? KeyIn(string block, string key)
+        {
+            string quoted = "\"" + key + "\"";
+            int at = block.IndexOf(quoted, StringComparison.OrdinalIgnoreCase);
+            if (at < 0) return null;
+            int open = block.IndexOf('"', at + quoted.Length);
+            int close = open < 0 ? -1 : block.IndexOf('"', open + 1);
+            return close > open ? block[(open + 1)..close] : null;
         }
 
         private static List<int> PortalNumbers(string entities)

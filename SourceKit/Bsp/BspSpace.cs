@@ -27,7 +27,7 @@ namespace SourceKit
 
         private readonly Plane3[] planes;
         private readonly (int Plane, int Front, int Back)[] nodes;
-        private readonly (int Contents, int Cluster, int FirstBrush, int BrushCount)[] leaves;
+        private readonly (int Contents, int Cluster, int FirstBrush, int BrushCount, int Area)[] leaves;
         private readonly ushort[] leafBrushes;
         private readonly (int FirstSide, int SideCount, int Contents)[] brushes;
         private readonly (int Plane, bool Bevel)[] sides;
@@ -36,7 +36,7 @@ namespace SourceKit
         public Vec3 Mins { get; }
         public Vec3 Maxs { get; }
 
-        private BspSpace(Plane3[] planes, (int, int, int)[] nodes, (int, int, int, int)[] leaves, ushort[] leafBrushes,
+        private BspSpace(Plane3[] planes, (int, int, int)[] nodes, (int, int, int, int, int)[] leaves, ushort[] leafBrushes,
             (int, int, int)[] brushes, (int, bool)[] sides, Vec3 mins, Vec3 maxs)
         {
             this.planes = planes;
@@ -90,12 +90,13 @@ namespace SourceKit
 
             var leafBytes = Lump(LumpLeafs);
             int leafSize = versions[LumpLeafs] == 0 ? 56 : 32;
-            var leaves = new (int, int, int, int)[leafBytes.Length / leafSize];
+            var leaves = new (int, int, int, int, int)[leafBytes.Length / leafSize];
             for (int i = 0; i < leaves.Length; i++)
             {
                 int at = i * leafSize;
                 leaves[i] = (BitConverter.ToInt32(leafBytes, at), BitConverter.ToInt16(leafBytes, at + 4),
-                    BitConverter.ToUInt16(leafBytes, at + 24), BitConverter.ToUInt16(leafBytes, at + 26));
+                    BitConverter.ToUInt16(leafBytes, at + 24), BitConverter.ToUInt16(leafBytes, at + 26),
+                    BitConverter.ToUInt16(leafBytes, at + 6) & 0x1FF);
             }
 
             var lbBytes = Lump(LumpLeafBrushes);
@@ -129,7 +130,7 @@ namespace SourceKit
                 if (plane < 0 || plane >= planes.Length || front >= nodes.Length || back >= nodes.Length
                     || -1 - front >= leaves.Length || -1 - back >= leaves.Length)
                     throw new InvalidDataException($"{path} has a node pointing outside the node, leaf or plane lumps.");
-            foreach (var (_, _, first, count) in leaves)
+            foreach (var (_, _, first, count, _) in leaves)
                 if (first + count > leafBrushes.Length)
                     throw new InvalidDataException($"{path} has a leaf whose brush list runs past the end of its lump.");
             foreach (ushort b in leafBrushes)
@@ -155,6 +156,15 @@ namespace SourceKit
         }
 
         public int ClusterAt(Vec3 point) => leaves[LeafAt(point)].Cluster;
+
+        /// <summary>The area <paramref name="point"/> is in; areaportals divide the map into areas.</summary>
+        public int AreaAt(Vec3 point) => leaves[LeafAt(point)].Area;
+
+        /// <summary>
+        /// Whether <paramref name="point"/> is inside structural (world) brushes. Detail never counts:
+        /// it does not fill leaves, and it cannot seal a leak or frame an areaportal.
+        /// </summary>
+        public bool IsStructuralSolid(Vec3 point) => (leaves[LeafAt(point)].Contents & ContentsSolid) != 0;
 
         /// <summary>
         /// Whether <paramref name="point"/> is in the void outside the map. VBSP fills everything a leak
