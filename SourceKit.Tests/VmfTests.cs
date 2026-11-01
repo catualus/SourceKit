@@ -72,12 +72,15 @@ namespace SourceKit.Tests
 
             """;
 
-        internal static VmfDocument CubeDocument() => VmfDocument.Parse(Cube.Replace("\n", "\r\n"));
+        /// <summary>The cube with CRLF endings, whichever endings this source file was checked out with.</summary>
+        internal static string CubeText => Cube.Replace("\r\n", "\n").Replace("\n", "\r\n");
+
+        internal static VmfDocument CubeDocument() => VmfDocument.Parse(CubeText);
 
         [Fact]
         public void AnUneditedDocumentWritesBackByteForByte()
         {
-            string text = Cube.Replace("\n", "\r\n");
+            string text = CubeText;
             Assert.Equal(text, VmfDocument.Parse(text).ToString());
         }
 
