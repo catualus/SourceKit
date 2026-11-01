@@ -36,6 +36,40 @@ namespace SourceKit
         /// <summary>Whether the header's flags mark this as usable as a static prop.</summary>
         public bool StaticProp { get; private set; }
 
+        /// <summary>The studiohdr flags word: STUDIOHDR_FLAGS_STATIC_PROP is 0x10, NO_FORCED_FADE 0x800.</summary>
+        public int Flags { get; private set; }
+
+        /// <summary>The model's $keyvalues text (prop_data and the like), or empty.</summary>
+        public string KeyValues { get; private set; } = "";
+
+        /// <summary>
+        /// Whether VBSP will place this model as a prop_static: it must be compiled with $staticprop, and
+        /// if it carries a prop_data block (a physics prop) that block must say allowstatic. Otherwise
+        /// VBSP deletes the prop: "must be used on a dynamic entity (i.e. prop_physics). Deleted."
+        /// </summary>
+        public bool UsableAsStaticProp
+        {
+            get
+            {
+                if (!StaticProp)
+                    return false;
+                string text = KeyValues.ToLowerInvariant();
+                int at = text.IndexOf("prop_data", StringComparison.Ordinal);
+                if (at < 0)
+                    return true;
+                int open = text.IndexOf('{', at);
+                int close = open < 0 ? -1 : text.IndexOf('}', open);
+                if (close < 0)
+                    return false;
+                string block = text[open..close];
+                int key = block.IndexOf("allowstatic", StringComparison.Ordinal);
+                if (key < 0)
+                    return false;
+                string rest = block[(key + "allowstatic".Length)..].TrimStart(' ', '	', '"');
+                return rest.Length > 0 && rest[0] != '0';
+            }
+        }
+
         /// <summary>The model's material names, without folder, in the order its texture table lists them.</summary>
         public System.Collections.Generic.IReadOnlyList<string> TextureNames { get; private set; } = [];
 
@@ -70,9 +104,11 @@ namespace SourceKit
 
             // view_bbmin and view_bbmax sit between the hull and the flags.
             ms.Seek(HullMinOffset + 24 + 24, SeekOrigin.Begin);
-            model.StaticProp = (r.ReadInt32() & FlagStaticProp) != 0;
+            model.Flags = r.ReadInt32();
+            model.StaticProp = (model.Flags & FlagStaticProp) != 0;
 
             ReadTextures(bytes, model);
+            ReadKeyValues(bytes, model);
 
             // A model with no collision bounds at all - both corners zero - describes nothing, and
             // returning it as a valid degenerate box would place a point-sized solid at the origin.
@@ -118,6 +154,17 @@ namespace SourceKit
             }
             model.TextureNames = names;
             model.TextureFolders = paths;
+        }
+
+        /// <summary>keyvalueindex and keyvaluesize at 312 and 316: the model's $keyvalues, as text.</summary>
+        private static void ReadKeyValues(byte[] bytes, StudioModel model)
+        {
+            if (bytes.Length < 320)
+                return;
+            int index = BitConverter.ToInt32(bytes, 312), size = BitConverter.ToInt32(bytes, 316);
+            if (index <= 0 || size <= 0 || index + (long)size > bytes.Length || size > 1 << 20)
+                return;
+            model.KeyValues = System.Text.Encoding.ASCII.GetString(bytes, index, size).TrimEnd(' ');
         }
 
         private static string? ReadString(byte[] bytes, long offset)
