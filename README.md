@@ -11,7 +11,7 @@ own self-contained executable.
 
 | Area | Types | Reads |
 | --- | --- | --- |
-| BSP | `BspFile`, `LzmaLump` | Entities, planes, texinfo, texdata, models, brushes and brush sides, with per-lump LZMA decompression |
+| BSP | `BspFile`, `BspVisibilityData`, `LzmaLump` | Entities, planes, texinfo, texdata, models, brushes and brush sides; the decoded PVS, leaves, leaf faces, face triangle counts, areas and areaportal numbers; with per-lump LZMA decompression |
 | Compile output | `PortalFile`, `PointFile` | VBSP's `.prt` portal file and `.lin` leak pointfile |
 | Map source | `VmfDocument`, `VmfBrush`, `VmfDiff`, `VmfRelocation` | A lossless VMF tree, brush geometry built from the plane points, a semantic diff of two maps, and moving a map without losing its instances |
 | Game content | `GameFiles`, `GameInfo`, `VpkArchive`, `GmaArchive`, `StudioModel` | Content a map can see, in the engine's search order: its pakfile, loose files, Garry's Mod addons, then VPKs; MDL headers |
