@@ -17,7 +17,6 @@ namespace SourceKit.Tests
         {
             byte[] F(params float[] v) => v.SelectMany(BitConverter.GetBytes).ToArray();
             byte[] I(params int[] v) => v.SelectMany(BitConverter.GetBytes).ToArray();
-            byte[] S(params short[] v) => v.SelectMany(BitConverter.GetBytes).ToArray();
             byte[] Plane(float x, float y, float z, float d) => [.. F(x, y, z, d), .. I(0)];
 
             // Plane 0 splits the world; planes 1-6 bound the cube.
