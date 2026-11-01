@@ -10,7 +10,7 @@ namespace SourceKit.Tests
     {
         /// <summary>
         /// Writes a BSP holding only the lumps BspVisibilityData reads: three clusters in a row, each
-        /// seeing its neighbours, one face shared by the last two.
+        /// seeing its neighbours, one face shared by the first two.
         /// </summary>
         internal static void WriteTinyBsp(string path, byte[]? visibility = null, string entities = "")
         {
