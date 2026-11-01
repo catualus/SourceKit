@@ -308,6 +308,28 @@ namespace SourceKit.Vmf
             items.Insert(index, added);
         }
 
+        /// <summary>
+        /// Adds a pair after the last one even when <paramref name="key"/> is already there: Hammer repeats
+        /// some keys, such as <c>visgroupid</c> for an object in more than one visgroup.
+        /// </summary>
+        public void Append(string key, string value)
+        {
+            var added = new VmfKeyValue(key, value) { Parent = this };
+            items.Insert(items.FindLastIndex(i => i is VmfKeyValue) + 1, added);
+        }
+
+        /// <summary>Adds a block just before <paramref name="before"/>, one of this block's own.</summary>
+        public void InsertBefore(VmfNode before, VmfNode node)
+        {
+            if (node.Parent != null)
+                throw new InvalidOperationException($"'{node.Name}' already belongs to a block.");
+            int index = items.IndexOf(before);
+            if (index < 0)
+                throw new ArgumentException($"'{before.Name}' is not in this block.", nameof(before));
+            node.Parent = this;
+            items.Insert(index, node);
+        }
+
         /// <summary>Adds a block at the end of this one.</summary>
         public void Add(VmfNode node)
         {

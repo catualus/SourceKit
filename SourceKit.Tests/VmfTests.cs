@@ -85,6 +85,24 @@ namespace SourceKit.Tests
         }
 
         [Fact]
+        public void AppendRepeatsAKeyAndInsertBeforePlacesABlock()
+        {
+            var doc = VmfDocument.Parse(CubeText);
+            var editor = new VmfNode("editor");
+            doc.World.Add(editor);
+            editor.Append("visgroupid", "3");
+            editor.Append("visgroupid", "7");
+            Assert.Equal(["3", "7"], editor.KeyValues.Where(kv => kv.Key == "visgroupid").Select(kv => kv.Value));
+
+            doc.Root.InsertBefore(doc.World, new VmfNode("visgroups"));
+            var names = doc.Root.Nodes.Select(n => n.Name).ToList();
+            Assert.Equal(names.IndexOf("world") - 1, names.IndexOf("visgroups"));
+
+            var reread = VmfDocument.Parse(doc.ToString());
+            Assert.Equal(2, reread.World.Child("editor")!.KeyValues.Count(kv => kv.Key == "visgroupid"));
+        }
+
+        [Fact]
         public void OddFormattingSurvivesTheRoundTrip()
         {
             // Spaces instead of tabs, a brace on the block's own line, a blank line, LF endings, no
