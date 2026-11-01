@@ -282,8 +282,13 @@ namespace SourceKit.Geometry
         /// The triangle (by its index in the corners given) a ray from <paramref name="origin"/> along
         /// <paramref name="direction"/> meets first within <paramref name="maxDistance"/>, or -1.
         /// </summary>
-        public int Trace(Vec3 origin, Vec3 direction, double maxDistance = double.MaxValue)
+        public int Trace(Vec3 origin, Vec3 direction, double maxDistance = double.MaxValue) =>
+            Trace(origin, direction, out _, maxDistance);
+
+        /// <summary>As <see cref="Trace(Vec3, Vec3, double)"/>, and how far along the ray the hit is.</summary>
+        public int Trace(Vec3 origin, Vec3 direction, out double distance, double maxDistance = double.MaxValue)
         {
+            distance = double.MaxValue;
             if (original.Length == 0)
                 return -1;
             float ox = (float)origin.X, oy = (float)origin.Y, oz = (float)origin.Z;
@@ -347,6 +352,8 @@ namespace SourceKit.Geometry
                     }
                 }
             }
+            if (hit >= 0)
+                distance = best;
             return hit;
         }
     }

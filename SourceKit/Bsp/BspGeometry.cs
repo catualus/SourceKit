@@ -15,7 +15,7 @@ namespace SourceKit
     {
         private const int LumpTexinfo = 6, LumpFaces = 7, LumpVertexes = 3, LumpEdges = 12, LumpSurfedges = 13, LumpModels = 14;
         private const int LumpDispInfo = 26, LumpDispVerts = 33;
-        private const int SurfSky2D = 0x2, SurfTrans = 0x10, SurfNoDraw = 0x80, SurfHint = 0x100, SurfSkip = 0x200;
+        private const int SurfSky2D = 0x2, SurfSky = 0x4, SurfTrans = 0x10, SurfNoDraw = 0x80, SurfHint = 0x100, SurfSkip = 0x200;
 
         /// <summary>Triangle corners, three per triangle.</summary>
         public Vec3[] Corners { get; }
@@ -25,6 +25,9 @@ namespace SourceKit
 
         /// <summary>Whether each triangle stops a ray: false for translucent and undrawn surfaces.</summary>
         public bool[] Blocks { get; }
+
+        /// <summary>Whether each triangle is sky: the map's ceiling, drawn as the skybox.</summary>
+        public bool[] Sky { get; private init; } = [];
 
         public int FaceCount { get; }
 
@@ -79,6 +82,7 @@ namespace SourceKit
             var corners = new List<Vec3>();
             var faceOf = new List<int>();
             var blocks = new List<bool>();
+            var sky = new List<bool>();
             var polygon = new List<Vec3>();
             for (int f = worldFirst; f < Math.Min(faceCount, worldFirst + worldCount); f++)
             {
@@ -103,9 +107,12 @@ namespace SourceKit
                 if (polygon.Count < 3)
                     continue;
 
+                bool isSky = (flags & SurfSky) != 0;
+                int before = faceOf.Count;
                 if (disp >= 0 && (disp + 1) * 176 <= dispInfo.Length && polygon.Count == 4)
                 {
                     AddDisplacement(polygon, dispInfo, disp * 176, dispVerts, f, block, corners, faceOf, blocks);
+                    for (int k = before; k < faceOf.Count; k++) sky.Add(isSky);
                     continue;
                 }
                 for (int k = 1; k + 1 < polygon.Count; k++)
@@ -115,9 +122,10 @@ namespace SourceKit
                     corners.Add(polygon[k + 1]);
                     faceOf.Add(f);
                     blocks.Add(block);
+                    sky.Add(isSky);
                 }
             }
-            return new BspGeometry(corners.ToArray(), faceOf.ToArray(), blocks.ToArray(), faceCount);
+            return new BspGeometry(corners.ToArray(), faceOf.ToArray(), blocks.ToArray(), faceCount) { Sky = sky.ToArray() };
         }
 
         /// <summary>
