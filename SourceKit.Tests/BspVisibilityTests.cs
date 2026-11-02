@@ -12,7 +12,9 @@ namespace SourceKit.Tests
         /// Writes a BSP holding only the lumps BspVisibilityData reads: three clusters in a row, each
         /// seeing its neighbours, one face shared by the first two.
         /// </summary>
-        internal static void WriteTinyBsp(string path, byte[]? visibility = null, string entities = "")
+        /// <param name="extra">More lumps by index; the game lump is given its own offset in the file, which its headers need.</param>
+        internal static void WriteTinyBsp(string path, byte[]? visibility = null, string entities = "",
+            Dictionary<int, byte[]>? extra = null, Func<int, byte[]>? gameLump = null)
         {
             var lumps = new Dictionary<int, byte[]>
             {
@@ -23,6 +25,13 @@ namespace SourceKit.Tests
                 [10] = Concat(Leaf(1, -1, 0, 0), Leaf(0, 0, 0, 1), Leaf(0, 1, 1, 2), Leaf(0, 2, 3, 1)),
                 [16] = Concat(U16(0), U16(0), U16(1), U16(2), U16(2)),
             };
+            foreach (var (index, bytes) in extra ?? [])
+                lumps[index] = bytes;
+            if (gameLump != null)
+            {
+                int before = 8 + 64 * 16 + 4 + Enumerable.Range(0, 35).Sum(i => lumps.GetValueOrDefault(i, []).Length);
+                lumps[35] = gameLump(before);
+            }
 
             using var stream = File.Create(path);
             using var w = new BinaryWriter(stream);
@@ -111,6 +120,56 @@ namespace SourceKit.Tests
                 File.Delete(path);
             }
         }
+
+        [Fact]
+        public void AreaportalOutlinesEntitiesAndStaticPropsAreRead()
+        {
+            string path = Temp();
+            try
+            {
+                // Two areas joined by portal 1, a square outline listed from each side.
+                var areas = Concat(I32(0), I32(0), I32(1), I32(0), I32(1), I32(1));
+                var portals = Concat(U16(1), U16(2), U16(0), U16(4), I32(0), U16(1), U16(1), U16(0), U16(4), I32(0));
+                var verts = Concat(V(0, 0, 0), V(0, 64, 0), V(0, 64, 96), V(0, 0, 96));
+                byte[] Game(int at)
+                {
+                    // One game lump, the static props: a model, a leaf list, and one prop in leaves 2 and 3.
+                    var name = new byte[128];
+                    System.Text.Encoding.ASCII.GetBytes("models/props_c17/chair.mdl").CopyTo(name, 0);
+                    var prop = new byte[60];
+                    BitConverter.GetBytes((ushort)0).CopyTo(prop, 24);
+                    BitConverter.GetBytes((ushort)1).CopyTo(prop, 26);
+                    BitConverter.GetBytes((ushort)2).CopyTo(prop, 28);
+                    var sprp = Concat(I32(1), name, I32(3), U16(9), U16(2), U16(3), I32(1), prop);
+                    return Concat(I32(1), I32(0x73707270), U16(0), U16(5), I32(at + 4 + 16), I32(sprp.Length), sprp);
+                }
+                WriteTinyBsp(path, entities: "{\n\"classname\" \"func_areaportalwindow\"\n\"targetname\" \"shop\"\n\"target\" \"shop_shut\"\n" +
+                    "\"FadeDist\" \"1200\"\n\"portalnumber\" \"1\"\n}\n{\n\"classname\" \"func_areaportal\"\n\"target\" \"door\"\n\"StartOpen\" \"0\"\n\"portalnumber\" \"2\"\n}\n",
+                    extra: new() { [20] = areas, [21] = portals, [41] = verts }, gameLump: Game);
+                var bsp = BspVisibilityData.Load(path);
+
+                var (a, b) = bsp.AreaPortalLinks[1];
+                Assert.Equal([1, 2], new[] { a, b }.Order());
+                Assert.Equal([new Geometry.Vec3(0, 0, 0), new Geometry.Vec3(0, 64, 0), new Geometry.Vec3(0, 64, 96), new Geometry.Vec3(0, 0, 96)],
+                    bsp.AreaPortalPolygons[1]);
+                var window = bsp.AreaPortalEntities.Single(e => e.Number == 1);
+                Assert.Equal(("func_areaportalwindow", "shop_shut", 1200.0), (window.Classname, window.Target, window.FadeDist));
+                var door = bsp.AreaPortalEntities.Single(e => e.Number == 2);
+                Assert.False(door.StartOpen);
+                Assert.Equal(double.PositiveInfinity, door.FadeDist);
+
+                Assert.Equal(["models/props_c17/chair.mdl"], bsp.StaticPropModels);
+                var placed = Assert.Single(bsp.StaticProps);
+                Assert.Equal([2, 3], bsp.StaticPropLeaves.Skip(placed.FirstLeaf).Take(placed.LeafCount).Select(l => (int)l));
+            }
+            finally
+            {
+                File.Delete(path);
+            }
+        }
+
+        private static byte[] I32(int value) => BitConverter.GetBytes(value);
+        private static byte[] V(float x, float y, float z) => Concat(BitConverter.GetBytes(x), BitConverter.GetBytes(y), BitConverter.GetBytes(z));
 
         [Fact]
         public void ARunOfZeroesExpandsToEmptyBytes()

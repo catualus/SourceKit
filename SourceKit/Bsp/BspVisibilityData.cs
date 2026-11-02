@@ -14,6 +14,15 @@ namespace SourceKit
     public readonly record struct BspFace(int Triangles, bool IsDisplacement, int TexInfo);
 
     /// <summary>
+    /// An areaportal entity as compiled: its portal number, what kind it is, the door that closes it
+    /// (its target), whether it starts open, and for a func_areaportalwindow the distance it is shut at.
+    /// </summary>
+    /// <summary>A static prop: its model, as an index into the model names, and the leaves it is in.</summary>
+    public readonly record struct BspStaticProp(int Model, int FirstLeaf, int LeafCount);
+
+    public sealed record BspAreaPortalEntity(int Number, string Classname, string? Targetname, string? Target, bool StartOpen, double FadeDist);
+
+    /// <summary>
     /// What a compiled map's visibility is made of: the potentially visible set per cluster, which
     /// leaves make up each cluster, which faces each leaf draws, and the areas and areaportals.
     ///
@@ -32,7 +41,9 @@ namespace SourceKit
         private const int LumpLeafFaces = 16;
         private const int LumpAreas = 20;
         private const int LumpAreaPortals = 21;
+        private const int LumpClipPortalVerts = 41;
         private const int LumpDispInfo = 26;
+        private const int LumpGame = 35;
 
         private const int SurfSky2D = 0x2, SurfSky = 0x4, SurfNoDraw = 0x80, SurfHint = 0x100, SurfSkip = 0x200;
 
@@ -58,6 +69,23 @@ namespace SourceKit
         /// VBSP could not place between two areas is not here.
         /// </summary>
         public IReadOnlyDictionary<int, (int AreaA, int AreaB)> AreaPortalLinks { get; private init; } = new Dictionary<int, (int, int)>();
+
+        /// <summary>
+        /// The outline VBSP clipped each placed portal to, by portal number, as the engine uses it to clip
+        /// what is drawn beyond the portal.
+        /// </summary>
+        public IReadOnlyDictionary<int, IReadOnlyList<Vec3>> AreaPortalPolygons { get; private init; } = new Dictionary<int, IReadOnlyList<Vec3>>();
+
+        /// <summary>The static props' model names, which <see cref="StaticProps"/> index.</summary>
+        public IReadOnlyList<string> StaticPropModels { get; private init; } = [];
+
+        /// <summary>Every static prop, with the run of <see cref="StaticPropLeaves"/> it sits in.</summary>
+        public IReadOnlyList<BspStaticProp> StaticProps { get; private init; } = [];
+
+        public IReadOnlyList<ushort> StaticPropLeaves { get; private init; } = [];
+
+        /// <summary>Every areaportal entity in the compiled map, numbered or not.</summary>
+        public IReadOnlyList<BspAreaPortalEntity> AreaPortalEntities { get; private init; } = [];
 
         /// <summary>The portal number VBSP gave each named areaportal entity.</summary>
         public IReadOnlyDictionary<string, int> PortalNumbersByName { get; private init; } = new Dictionary<string, int>();
@@ -141,6 +169,7 @@ namespace SourceKit
                     throw new InvalidDataException($"A leaf lists face {face}, but the map has {faces.Length}.");
 
             string entities = Encoding.Latin1.GetString(Lump(LumpEntities));
+            var (propModels, props, propLeaves) = ReadStaticProps(r, offsets[LumpGame], lengths[LumpGame]);
             var portalNumbers = PortalNumbers(entities);
 
             return new BspVisibilityData(clusters, rows, leaves, faces, leafFaces,
@@ -148,6 +177,11 @@ namespace SourceKit
                 portalNumbers.Count == 0 ? 0 : portalNumbers.Max(), portalNumbers.Count)
             {
                 AreaPortalLinks = ReadAreaPortalLinks(Lump(LumpAreas), Lump(LumpAreaPortals)),
+                AreaPortalPolygons = ReadAreaPortalPolygons(Lump(LumpAreaPortals), Lump(LumpClipPortalVerts)),
+                AreaPortalEntities = ReadAreaPortalEntities(entities),
+                StaticPropModels = propModels,
+                StaticProps = props,
+                StaticPropLeaves = propLeaves,
                 PortalNumbersByName = PortalNumbersByTargetname(entities),
             };
         }
@@ -295,6 +329,100 @@ namespace SourceKit
                 }
             }
             return links;
+        }
+
+        /// <summary>Each portal's clip outline: dareaportal_t names a run of clip portal vertices (12-byte vectors).</summary>
+        private static Dictionary<int, IReadOnlyList<Vec3>> ReadAreaPortalPolygons(byte[] portals, byte[] verts)
+        {
+            var polygons = new Dictionary<int, IReadOnlyList<Vec3>>();
+            int vertCount = verts.Length / 12;
+            for (int i = 0; i < portals.Length / 12; i++)
+            {
+                int key = BitConverter.ToUInt16(portals, i * 12);
+                int first = BitConverter.ToUInt16(portals, i * 12 + 4), count = BitConverter.ToUInt16(portals, i * 12 + 6);
+                if (polygons.ContainsKey(key) || count < 3 || first + count > vertCount)
+                    continue;
+                var points = new Vec3[count];
+                for (int v = 0; v < count; v++)
+                {
+                    int at = (first + v) * 12;
+                    points[v] = new Vec3(BitConverter.ToSingle(verts, at), BitConverter.ToSingle(verts, at + 4), BitConverter.ToSingle(verts, at + 8));
+                }
+                polygons[key] = points;
+            }
+            return polygons;
+        }
+
+        /// <summary>
+        /// The static prop game lump ('sprp'): model names of 128 bytes, the leaf list, then the props.
+        /// Every version keeps the first leaf and leaf count at the same place in a prop, after its
+        /// origin, angles and type; the size of a prop is what the lump has left over each.
+        /// </summary>
+        private static (string[] Models, BspStaticProp[] Props, ushort[] Leaves) ReadStaticProps(BinaryReader r, int offset, int length)
+        {
+            if (length < 4)
+                return ([], [], []);
+            r.BaseStream.Position = offset;
+            int count = r.ReadInt32();
+            for (int i = 0; i < count; i++)
+            {
+                int id = r.ReadInt32();
+                ushort flags = r.ReadUInt16();
+                r.ReadUInt16(); // version
+                int at = r.ReadInt32(), size = r.ReadInt32();
+                if (id != 0x73707270 || (flags & 1) != 0 || size < 12)
+                    continue;
+                var bytes = new byte[size];
+                r.BaseStream.Position = at;
+                r.BaseStream.ReadExactly(bytes);
+                int p = 0;
+                int names = BitConverter.ToInt32(bytes, p); p += 4;
+                if (names < 0 || p + names * 128L > size)
+                    return ([], [], []);
+                var models = new string[names];
+                for (int n = 0; n < names; n++, p += 128)
+                {
+                    int end = Array.IndexOf(bytes, (byte)0, p, 128);
+                    models[n] = Encoding.ASCII.GetString(bytes, p, (end < 0 ? p + 128 : end) - p);
+                }
+                int leafCount = BitConverter.ToInt32(bytes, p); p += 4;
+                if (leafCount < 0 || p + leafCount * 2L > size)
+                    return ([], [], []);
+                var leaves = new ushort[leafCount];
+                for (int n = 0; n < leafCount; n++, p += 2)
+                    leaves[n] = BitConverter.ToUInt16(bytes, p);
+                int propCount = BitConverter.ToInt32(bytes, p); p += 4;
+                if (propCount <= 0)
+                    return (models, [], leaves);
+                int stride = (size - p) / propCount;
+                if (stride < 30)
+                    return (models, [], leaves);
+                var props = new BspStaticProp[propCount];
+                for (int n = 0; n < propCount; n++)
+                {
+                    int e = p + n * stride;
+                    props[n] = new BspStaticProp(BitConverter.ToUInt16(bytes, e + 24), BitConverter.ToUInt16(bytes, e + 26), BitConverter.ToUInt16(bytes, e + 28));
+                }
+                return (models, props, leaves);
+            }
+            return ([], [], []);
+        }
+
+        private static List<BspAreaPortalEntity> ReadAreaPortalEntities(string entities)
+        {
+            var result = new List<BspAreaPortalEntity>();
+            foreach (string block in entities.Split('}'))
+            {
+                string? classname = KeyIn(block, "classname");
+                if (classname is not ("func_areaportal" or "func_areaportalwindow") || KeyIn(block, "portalnumber") is not { } number
+                    || !int.TryParse(number, out int n))
+                    continue;
+                double fade = double.TryParse(KeyIn(block, "FadeDist"), System.Globalization.NumberStyles.Float,
+                    System.Globalization.CultureInfo.InvariantCulture, out double f) ? f : double.PositiveInfinity;
+                result.Add(new BspAreaPortalEntity(n, classname, KeyIn(block, "targetname"), KeyIn(block, "target"),
+                    KeyIn(block, "StartOpen") is not "0", classname == "func_areaportalwindow" ? fade : double.PositiveInfinity));
+            }
+            return result;
         }
 
         private static Dictionary<string, int> PortalNumbersByTargetname(string entities)
