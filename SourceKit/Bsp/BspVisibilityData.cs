@@ -13,13 +13,13 @@ namespace SourceKit
     /// <summary>A drawn face: how many triangles it costs, and the leaves' area it sits in.</summary>
     public readonly record struct BspFace(int Triangles, bool IsDisplacement, int TexInfo);
 
+    /// <summary>A static prop: its model, the run of leaves it sits in, where it stands, and how far away it is gone (0: never).</summary>
+    public readonly record struct BspStaticProp(int Model, int FirstLeaf, int LeafCount, Vec3 Origin = default, float FadeMax = 0);
+
     /// <summary>
     /// An areaportal entity as compiled: its portal number, what kind it is, the door that closes it
     /// (its target), whether it starts open, and for a func_areaportalwindow the distance it is shut at.
     /// </summary>
-    /// <summary>A static prop: its model, as an index into the model names, and the leaves it is in.</summary>
-    public readonly record struct BspStaticProp(int Model, int FirstLeaf, int LeafCount);
-
     public sealed record BspAreaPortalEntity(int Number, string Classname, string? Targetname, string? Target, bool StartOpen, double FadeDist);
 
     /// <summary>
@@ -401,7 +401,11 @@ namespace SourceKit
                 for (int n = 0; n < propCount; n++)
                 {
                     int e = p + n * stride;
-                    props[n] = new BspStaticProp(BitConverter.ToUInt16(bytes, e + 24), BitConverter.ToUInt16(bytes, e + 26), BitConverter.ToUInt16(bytes, e + 28));
+                    var origin = new Vec3(BitConverter.ToSingle(bytes, e), BitConverter.ToSingle(bytes, e + 4), BitConverter.ToSingle(bytes, e + 8));
+                    // fade distances follow the skin, from version 4 on: every version a GMod or TF2 map uses
+                    float fadeMax = stride >= 44 ? BitConverter.ToSingle(bytes, e + 40) : 0;
+                    props[n] = new BspStaticProp(BitConverter.ToUInt16(bytes, e + 24), BitConverter.ToUInt16(bytes, e + 26), BitConverter.ToUInt16(bytes, e + 28),
+                        origin, fadeMax > 0 ? fadeMax : 0);
                 }
                 return (models, props, leaves);
             }
