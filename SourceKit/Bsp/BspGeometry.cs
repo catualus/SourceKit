@@ -29,6 +29,9 @@ namespace SourceKit
         /// <summary>Whether each triangle is sky: the map's ceiling, drawn as the skybox.</summary>
         public bool[] Sky { get; private init; } = [];
 
+        /// <summary>Whether each triangle is part of a displacement.</summary>
+        public bool[] Displacement { get; private init; } = [];
+
         public int FaceCount { get; }
 
         public int TriangleCount => FaceOf.Length;
@@ -83,6 +86,7 @@ namespace SourceKit
             var faceOf = new List<int>();
             var blocks = new List<bool>();
             var sky = new List<bool>();
+            var displacement = new List<bool>();
             var polygon = new List<Vec3>();
             for (int f = worldFirst; f < Math.Min(faceCount, worldFirst + worldCount); f++)
             {
@@ -112,7 +116,11 @@ namespace SourceKit
                 if (disp >= 0 && (disp + 1) * 176 <= dispInfo.Length && polygon.Count == 4)
                 {
                     AddDisplacement(polygon, dispInfo, disp * 176, dispVerts, f, block, corners, faceOf, blocks);
-                    for (int k = before; k < faceOf.Count; k++) sky.Add(isSky);
+                    for (int k = before; k < faceOf.Count; k++)
+                    {
+                        sky.Add(isSky);
+                        displacement.Add(true);
+                    }
                     continue;
                 }
                 for (int k = 1; k + 1 < polygon.Count; k++)
@@ -123,9 +131,11 @@ namespace SourceKit
                     faceOf.Add(f);
                     blocks.Add(block);
                     sky.Add(isSky);
+                    displacement.Add(false);
                 }
             }
-            return new BspGeometry(corners.ToArray(), faceOf.ToArray(), blocks.ToArray(), faceCount) { Sky = sky.ToArray() };
+            return new BspGeometry(corners.ToArray(), faceOf.ToArray(), blocks.ToArray(), faceCount)
+                { Sky = sky.ToArray(), Displacement = displacement.ToArray() };
         }
 
         /// <summary>

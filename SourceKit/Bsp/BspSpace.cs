@@ -140,7 +140,32 @@ namespace SourceKit
                 if (first < 0 || first + count > sides.Length)
                     throw new InvalidDataException($"{path} has a brush whose sides run past the end of their lump.");
 
-            return new BspSpace(planes, nodes, leaves, leafBrushes, brushes, sides, mins, maxs);
+            return new BspSpace(planes, nodes, leaves, leafBrushes, brushes, sides, mins, maxs) { source = path };
+        }
+
+        private string? source;
+        private Triangle[]? displacements;
+
+        /// <summary>A displacement triangle.</summary>
+        public readonly record struct Triangle(Vec3 A, Vec3 B, Vec3 C);
+
+        /// <summary>
+        /// The world's displacement surfaces. VBSP makes none of them solid in the tree: the space under
+        /// a terrain displacement is open there, joined to the air above it, and only the displacement's
+        /// own collision keeps a player on top. Read from the BSP the first time they are asked for.
+        /// </summary>
+        public IReadOnlyList<Triangle> Displacements => displacements ??= LoadDisplacements();
+
+        private Triangle[] LoadDisplacements()
+        {
+            if (source == null)
+                return [];
+            var geometry = BspGeometry.Load(source);
+            var list = new List<Triangle>();
+            for (int i = 0; i < geometry.TriangleCount; i++)
+                if (geometry.Displacement[i])
+                    list.Add(new Triangle(geometry.Corners[i * 3], geometry.Corners[i * 3 + 1], geometry.Corners[i * 3 + 2]));
+            return list.ToArray();
         }
 
         /// <summary>The leaf <paramref name="point"/> is in, walking the world's tree from its head node.</summary>
