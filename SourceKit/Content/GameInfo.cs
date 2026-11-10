@@ -70,7 +70,12 @@ namespace SourceKit
 
             // The mod directory, and the install root it sits in. These are what the two path macros
             // expand to, and what a bare relative entry is relative to.
-            string mod = Path.GetFullPath(modDirectory);
+            //
+            // Trailing separators are trimmed first. Directory.GetParent answers "C:/GarrysMod/garrysmod/"
+            // with "C:/GarrysMod/garrysmod" - the folder itself - so a mod path given with a trailing slash
+            // made the install root the mod, and every |all_source_engine_paths| entry (sourceengine,
+            // platform) resolved to a folder inside the mod that does not exist.
+            string mod = Path.TrimEndingDirectorySeparator(Path.GetFullPath(modDirectory));
             string install = Directory.GetParent(mod)?.FullName ?? mod;
 
             int at = tokens.FindIndex(t =>
@@ -188,11 +193,13 @@ namespace SourceKit
         /// <summary>
         /// Splits KeyValues text into quoted strings, bare words and braces.
         ///
-        /// Enough of the format for this one block, not a general reader. Quoted values are taken
-        /// verbatim because a path may contain spaces; <c>//</c> runs to end of line, and this file
-        /// genuinely uses them - Garry's Mod's own gameinfo has a comment inside SearchPaths.
+        /// Enough of the format for the small Valve text files read here (gameinfo, mount.cfg, Steam's
+        /// library and app manifests), not a general reader. Quoted values are taken verbatim, with no
+        /// escape processing, because a path may contain spaces and backslashes; <c>//</c> runs to end of
+        /// line, and these files genuinely use them - Garry's Mod's own gameinfo has a comment inside
+        /// SearchPaths.
         /// </summary>
-        private static List<string> Tokenise(string text)
+        internal static List<string> Tokenise(string text)
         {
             var tokens = new List<string>();
             var word = new StringBuilder();

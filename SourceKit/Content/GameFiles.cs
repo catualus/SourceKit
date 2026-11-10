@@ -1,8 +1,10 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
-using System.IO.Compression;
 using System.Linq;
+using SharpCompress.Archives;
+using SharpCompress.Archives.Zip;
+using SharpCompress.Readers;
 
 namespace SourceKit
 {
@@ -10,13 +12,15 @@ namespace SourceKit
     /// Finds a game file the way the engine would, so a model named by the map can be opened.
     ///
     /// A static prop names its model as a path relative to the mod directory, and that path can resolve
-    /// to four different places. In descending priority:
+    /// to several different places. In descending priority:
     ///
     /// 1. The map's own embedded pakfile. A mapper who ships custom models packs them into the .bsp, and
     ///    those override everything - they exist precisely because the content is not installed.
-    /// 2. Loose files under the mod directory, and under any addon folder beneath it.
-    /// 3. Loose files under the base game directories a mod inherits from.
-    /// 4. VPKs, where stock game content lives.
+    /// 2. Loose files: the addon or download folder the map itself sits in, the mod directory, any addon
+    ///    folder beneath it, the base game directories a mod inherits from, and last the other games
+    ///    Garry's Mod mounts through <c>cfg/mount.cfg</c> and <c>cfg/mountdepots.txt</c>.
+    /// 3. Garry's Mod addon archives (.gma).
+    /// 4. VPKs, where stock game content lives, in the same order as the directories above.
     ///
     /// The order matters and is not arbitrary. Getting it backwards means a map that ships a modified
     /// version of a stock prop silently collides against the stock one.
@@ -50,11 +54,29 @@ namespace SourceKit
         /// <summary>Workshop addon archives, discovered eagerly and indexed on demand.</summary>
         private readonly List<string> gmaPaths = [];
 
+        /// <summary>
+        /// Every archive already queued, by full path. The same VPK is named by the gameinfo and found
+        /// again in the root it sits in, and the same .gma turns up under a named root that is also the
+        /// mod; without this each would be parsed and searched twice.
+        /// </summary>
+        private readonly HashSet<string> queued = new(StringComparer.OrdinalIgnoreCase);
+
         private List<GmaArchive>? gmas;
 
         private List<VpkArchive>? vpks;
-        private ZipArchive? pak;
-        private readonly Dictionary<string, ZipArchiveEntry> pakEntries = new(StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>
+        /// The map's pakfile, read straight out of the .bsp through a window onto the lump.
+        ///
+        /// SharpCompress rather than <c>System.IO.Compression</c>, because a map that has been through
+        /// <c>bspzip -repack</c> stores nearly every entry with zip method 14 (LZMA), which the framework's
+        /// reader refuses: on the shipped rp_downtown_meowy.bsp that was 3,534 of 3,540 entries, every
+        /// packed model among them. The window keeps the lump on disk instead of in memory, which on the
+        /// largest map measured was 163 MB.
+        /// </summary>
+        private IArchive? pak;
+        private Stream? pakStream;
+        private readonly Dictionary<string, IArchiveEntry> pakEntries = new(StringComparer.OrdinalIgnoreCase);
 
         /// <summary>Paths asked for and not found anywhere, so the gap can be reported rather than guessed at.</summary>
         public IReadOnlyCollection<string> Missing => missing.Keys.ToArray();
@@ -63,13 +85,13 @@ namespace SourceKit
             new(StringComparer.OrdinalIgnoreCase);
 
         /// <summary>
-        /// Guards the two archive readers, which are stateful and are not safe to share.
+        /// Guards the three archive readers, which are stateful and are not safe to share.
         ///
         /// Callers load models in parallel, and most of that work - parsing a hull out of the bytes -
-        /// genuinely is independent. Fetching the bytes is not always: <see cref="ZipArchive"/> is
-        /// documented as unsafe for concurrent use, and a <see cref="VpkArchive"/> seeks and reads
-        /// shared file handles, so two threads reading different files from one archive would interleave
-        /// each other's seeks and return spliced garbage.
+        /// genuinely is independent. Fetching the bytes is not always: a zip archive reads its entries
+        /// through one shared stream, and a <see cref="VpkArchive"/> seeks and reads shared file handles,
+        /// so two threads reading different files from one archive would interleave each other's seeks
+        /// and return spliced garbage.
         ///
         /// Deliberately narrow. Loose files are read outside it, because <c>File.ReadAllBytes</c> is safe
         /// concurrently and loose content is the common case - on a normal Garry's Mod install with
@@ -117,19 +139,34 @@ namespace SourceKit
         /// <summary>
         /// Opens the content a map can see, inferring the install layout from the map's own path.
         ///
-        /// A .bsp lives in <c>&lt;mod&gt;/maps</c>, so the mod directory is two levels up and the rest of
-        /// the install is its siblings. That inference is the whole reason no configuration is needed
-        /// for the ordinary case, and it is also its limit: a BSP sitting anywhere else - a build
-        /// server's output directory, a scratch copy - infers a mod directory that does not exist, finds
-        /// nothing, and produces a mesh with no prop collision at all. <paramref name="extraRoots"/> and
-        /// <see cref="AdditionalRoots"/> are how that case is answered.
+        /// The mod directory is the nearest folder at or above the map that holds a
+        /// <c>gameinfo.txt</c>, and the rest of the install is found from there. For the ordinary
+        /// <c>&lt;mod&gt;/maps/x.bsp</c> that is two levels up, but Garry's Mod also keeps maps in
+        /// <c>addons/&lt;addon&gt;/maps</c> and <c>download/maps</c>, where two levels up is a folder with no
+        /// gameinfo, no VPKs and no addons of its own. When no gameinfo is found at all, the folder
+        /// above the map's is taken as the mod, as before. When the map sits in a <c>maps</c> folder
+        /// that is not the mod's own, the folder above it - the addon, or <c>download</c> - is searched
+        /// first, ahead of the mod, because that is where the map's own content was put.
+        ///
+        /// That inference is the whole reason no configuration is needed for the ordinary case, and it
+        /// is also its limit: a BSP sitting outside any install - a build server's output directory, a
+        /// scratch copy - finds nothing, and produces a mesh with no prop collision at all.
+        /// <paramref name="extraRoots"/> and <see cref="AdditionalRoots"/> are how that case is answered.
         /// </summary>
         public static GameFiles Open(string bspPath, IEnumerable<string>? extraRoots = null)
         {
             var files = new GameFiles();
 
-            var maps = Directory.GetParent(Path.GetFullPath(bspPath));
-            var mod = maps?.Parent;
+            var folder = Directory.GetParent(Path.GetFullPath(bspPath));
+            var mod = FindMod(folder);
+
+            // The addon or download folder the map was installed into. Searched before the mod, the
+            // same as the engine does with a mounted addon over the base game.
+            if (folder is not null && folder.Name.Equals("maps", StringComparison.OrdinalIgnoreCase) &&
+                folder.Parent is { } own && !SamePath(own.FullName, mod?.FullName))
+            {
+                files.AddRoot(own.FullName);
+            }
 
             if (mod is not null)
             {
@@ -182,37 +219,30 @@ namespace SourceKit
                 files.AddSearchPaths(GameInfo.Read(root));
             }
 
+            // Other games Garry's Mod mounts - Counter-Strike: Source, Team Fortress 2 and the rest -
+            // last, after all of its own content, which is where the engine puts them too. A GMod
+            // install has none of their folders beside it, so the sibling guess above never finds them.
+            if (mod is not null)
+                files.AddMountedGames(mod.FullName);
+
+            foreach (var root in Named(extraRoots))
+                files.AddMountedGames(root);
+
             foreach (var root in files.roots.ToArray())
                 files.AddVpksIn(root);
 
-
-
             // Subscribed content, which for Garry's Mod is where most third-party props live. The cache
-
-
             // directory is the game's own download location; loose .gma files beside the addons are the
-
-
             // other place they turn up.
-
-
             if (mod is not null)
-
-
             {
                 files.AddGmasIn(Path.Combine(mod.FullName, "cache", "workshop"));
                 files.AddGmasIn(Path.Combine(mod.FullName, "addons"));
 
-
                 // Steam keeps its own copy of subscribed items, outside the game directory entirely:
-
                 // steamapps/workshop/content/4000, a sibling of the "common" folder the install lives in.
-
                 if (mod.Parent?.Parent?.Parent is { } steamapps)
-
                     files.AddGmasIn(Path.Combine(steamapps.FullName, "workshop", "content", "4000"));
-
-
             }
 
             // A named root gets the same treatment as the mod directory, addon archives included. It is
@@ -231,6 +261,46 @@ namespace SourceKit
             files.PakMs = clock.ElapsedMilliseconds;
             return files;
         }
+
+        /// <summary>
+        /// The mod directory a map belongs to: the nearest folder at or above <paramref name="folder"/>
+        /// holding a gameinfo, or, when there is none, the folder above <paramref name="folder"/>.
+        /// </summary>
+        private static DirectoryInfo? FindMod(DirectoryInfo? folder)
+        {
+            try
+            {
+                for (var at = folder; at is not null; at = at.Parent)
+                {
+                    if (File.Exists(Path.Combine(at.FullName, GameInfo.FileName)))
+                        return at;
+                }
+            }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+
+            return folder?.Parent;
+        }
+
+        /// <summary>
+        /// A directory in one canonical form: absolute, and without a trailing separator. A path typed
+        /// as <c>...\garrysmod\</c> and one inferred as <c>...\garrysmod</c> are the same root, and
+        /// treating them as two both searches it twice and breaks anything that walks up from it.
+        /// Null for a path that cannot be a directory at all.
+        /// </summary>
+        internal static string? Canonical(string path)
+        {
+            try
+            {
+                return Path.TrimEndingDirectorySeparator(Path.GetFullPath(path.Trim()));
+            }
+            catch (ArgumentException) { return null; }
+            catch (PathTooLongException) { return null; }
+            catch (NotSupportedException) { return null; }
+        }
+
+        private static bool SamePath(string a, string? b) =>
+            b is not null && string.Equals(Canonical(a), Canonical(b), StringComparison.OrdinalIgnoreCase);
 
         /// <summary>
         /// Resolves a model path against a content root, refusing anything that escapes it.
@@ -279,8 +349,21 @@ namespace SourceKit
 
         private void AddRoot(string path)
         {
-            if (Directory.Exists(path) && !roots.Contains(path, StringComparer.OrdinalIgnoreCase))
-                roots.Add(path);
+            if (Canonical(path) is { } root && Directory.Exists(root) &&
+                !roots.Contains(root, StringComparer.OrdinalIgnoreCase))
+            {
+                roots.Add(root);
+            }
+        }
+
+        /// <summary>
+        /// Adds the game directories a Garry's Mod install mounts on top of its own content. Each
+        /// becomes an ordinary root, so its loose files are searched and its VPKs queued like any other.
+        /// </summary>
+        private void AddMountedGames(string modDirectory)
+        {
+            foreach (var game in GameMounts.Read(modDirectory))
+                AddRoot(game);
         }
 
         /// <summary>
@@ -295,15 +378,24 @@ namespace SourceKit
         {
             try
             {
-                if (!Directory.Exists(directory)) return;
+                if (Canonical(directory) is not { } dir || !Directory.Exists(dir)) return;
 
-                gmaPaths.AddRange(Directory.EnumerateFiles(directory, "*.gma", SearchOption.TopDirectoryOnly));
+                foreach (var gma in Directory.EnumerateFiles(dir, "*.gma", SearchOption.TopDirectoryOnly))
+                    Queue(gmaPaths, gma);
 
-                foreach (var child in Directory.EnumerateDirectories(directory))
-                    gmaPaths.AddRange(Directory.EnumerateFiles(child, "*.gma", SearchOption.TopDirectoryOnly));
+                foreach (var child in Directory.EnumerateDirectories(dir))
+                    foreach (var gma in Directory.EnumerateFiles(child, "*.gma", SearchOption.TopDirectoryOnly))
+                        Queue(gmaPaths, gma);
             }
             catch (IOException) { }
             catch (UnauthorizedAccessException) { }
+        }
+
+        /// <summary>Adds an archive to its list unless it is already queued, under any spelling of its path.</summary>
+        private void Queue(List<string> list, string path)
+        {
+            if (Canonical(path) is { } full && queued.Add(full))
+                list.Add(full);
         }
 
         /// <summary>
@@ -336,8 +428,8 @@ namespace SourceKit
                 File.Exists(directoryForm) ? directoryForm :
                 File.Exists(path) ? path : null;
 
-            if (actual is not null && !vpkPaths.Contains(actual, StringComparer.OrdinalIgnoreCase))
-                vpkPaths.Add(actual);
+            if (actual is not null)
+                Queue(vpkPaths, actual);
         }
 
         private void AddVpksIn(string root)
@@ -347,7 +439,8 @@ namespace SourceKit
                 // Only the directory archives. The numbered ones beside them hold bodies and are opened
                 // through the directory that indexes them; treating one as an archive in its own right
                 // finds no directory and wastes a file handle.
-                vpkPaths.AddRange(Directory.EnumerateFiles(root, "*_dir.vpk", SearchOption.TopDirectoryOnly));
+                foreach (var vpk in Directory.EnumerateFiles(root, "*_dir.vpk", SearchOption.TopDirectoryOnly))
+                    Queue(vpkPaths, vpk);
             }
             catch (IOException) { }
             catch (UnauthorizedAccessException) { }
@@ -355,10 +448,14 @@ namespace SourceKit
 
         private void OpenPakfile(string bspPath)
         {
+            Stream? file = null;
+
             try
             {
-                using var stream = File.OpenRead(bspPath);
-                using var r = new BinaryReader(stream);
+                // Shared for writing and deleting too: this handle stays open for as long as the lookup
+                // does, and must not stop a later step from rewriting or replacing the map.
+                file = new FileStream(bspPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+                using var r = new BinaryReader(file, System.Text.Encoding.ASCII, leaveOpen: true);
 
                 r.BaseStream.Seek(8, SeekOrigin.Begin);
 
@@ -371,17 +468,46 @@ namespace SourceKit
                     if (i == LumpPakfile) { offset = o; length = l; }
                 }
 
-                if (length <= 0) return;
+                if (length <= 0 || offset < 0 || offset >= file.Length) return;
 
-                var bytes = LzmaLump.Read(r, offset, length);
+                // The engine never compresses the pakfile lump itself, but a lump that does carry the
+                // tag is decompressed into memory rather than misread as a zip.
+                r.BaseStream.Seek(offset, SeekOrigin.Begin);
+                bool tagged = length >= 4 && r.ReadUInt32() == 0x414D5A4C;     // "LZMA"
 
-                pak = new ZipArchive(new MemoryStream(bytes), ZipArchiveMode.Read);
+                Stream lump = tagged
+                    ? new MemoryStream(LzmaLump.Read(r, offset, length), writable: false)
+                    : new Window(file, offset, Math.Min(length, file.Length - offset));
 
-                foreach (var entry in pak.Entries)
-                    pakEntries[entry.FullName.Replace('\\', '/')] = entry;
+                var archive = ZipArchive.OpenArchive(lump, new ReaderOptions { LeaveStreamOpen = true });
+
+                foreach (var entry in archive.Entries)
+                {
+                    if (!entry.IsDirectory && entry.Key is { } key)
+                        pakEntries[key.Replace('\\', '/')] = entry;
+                }
+
+                pak = archive;
+                pakStream = lump;
+
+                if (tagged)
+                    file.Dispose();
+
+                file = null;
             }
-            catch (InvalidDataException) { pak = null; }
-            catch (IOException) { pak = null; }
+            catch (Exception ex) when (ex is not OutOfMemoryException)
+            {
+                // A pakfile that will not open costs the packed content, not the lookup. Which exception
+                // a damaged zip produces depends on where it is damaged, so all of them are taken here.
+                pakEntries.Clear();
+                pak?.Dispose();
+                pak = null;
+                pakStream = null;
+            }
+            finally
+            {
+                file?.Dispose();
+            }
         }
 
         public bool TryRead(string relativePath, out byte[] bytes)
@@ -395,7 +521,7 @@ namespace SourceKit
                 {
                     lock (archives)
                     {
-                        using var s = entry.Open();
+                        using var s = entry.OpenEntryStream();
                         using var ms = new MemoryStream();
                         s.CopyTo(ms);
                         bytes = ms.ToArray();
@@ -404,7 +530,12 @@ namespace SourceKit
                     System.Threading.Interlocked.Increment(ref ReadsFromPakfile);
                     return true;
                 }
-                catch (InvalidDataException) { }
+                catch (Exception ex) when (ex is not OutOfMemoryException)
+                {
+                    // A damaged entry, or a compression method nothing here reads: fall through to the
+                    // installed copy, which is the best answer left.
+                    bytes = [];
+                }
             }
 
             foreach (var root in roots)
@@ -501,7 +632,6 @@ namespace SourceKit
                 vpks = null;
             }
 
-
             if (gmas is not null)
             {
                 foreach (var gma in gmas) gma.Dispose();
@@ -510,6 +640,62 @@ namespace SourceKit
 
             pak?.Dispose();
             pak = null;
+
+            pakStream?.Dispose();
+            pakStream = null;
+        }
+
+        /// <summary>
+        /// A read-only view of one stretch of a stream, so the pakfile can be read as a zip in place.
+        /// Disposing it disposes the stream underneath, which only it holds.
+        /// </summary>
+        private sealed class Window(Stream inner, long start, long length) : Stream
+        {
+            private long position;
+
+            public override bool CanRead => true;
+            public override bool CanSeek => true;
+            public override bool CanWrite => false;
+            public override long Length => length;
+
+            public override long Position
+            {
+                get => position;
+                set => position = Math.Clamp(value, 0, length);
+            }
+
+            public override int Read(byte[] buffer, int offset, int count) => Read(buffer.AsSpan(offset, count));
+
+            public override int Read(Span<byte> buffer)
+            {
+                long left = length - position;
+                if (left <= 0 || buffer.Length == 0) return 0;
+
+                if (buffer.Length > left)
+                    buffer = buffer[..(int)left];
+
+                inner.Seek(start + position, SeekOrigin.Begin);
+                int read = inner.Read(buffer);
+                position += read;
+                return read;
+            }
+
+            public override long Seek(long offset, SeekOrigin origin) => Position = origin switch
+            {
+                SeekOrigin.Begin => offset,
+                SeekOrigin.Current => position + offset,
+                _ => length + offset,
+            };
+
+            public override void Flush() { }
+            public override void SetLength(long value) => throw new NotSupportedException();
+            public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+
+            protected override void Dispose(bool disposing)
+            {
+                if (disposing) inner.Dispose();
+                base.Dispose(disposing);
+            }
         }
     }
 }
