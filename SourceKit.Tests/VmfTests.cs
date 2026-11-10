@@ -253,6 +253,48 @@ namespace SourceKit.Tests
             Assert.Contains(changes, c => c.Kind == VmfChangeKind.Added && c.Path == "entity#30");
         }
 
+        /// <summary>
+        /// Real maps repeat ids. Removing one block must not change how the repeats after it are named,
+        /// or an untouched brush shows up as removed and added again - an undeclared change, which stops
+        /// a Viswright compile.
+        /// </summary>
+        [Fact]
+        public void RemovingABlockDoesNotRenameRepeatedIdsAfterIt()
+        {
+            static string Map(bool withFirst) =>
+                "world\n{\n\t\"id\" \"1\"\n\t\"classname\" \"worldspawn\"\n" +
+                (withFirst ? "\tsolid\n\t{\n\t\t\"id\" \"2\"\n\t}\n" : "") +
+                "\tsolid\n\t{\n\t\t\"id\" \"5\"\n\t\t\"note\" \"first\"\n\t}\n" +
+                "\tsolid\n\t{\n\t\t\"id\" \"5\"\n\t\t\"note\" \"second\"\n\t}\n" +
+                "\tsolid\n\t{\n\t\t\"id\" \"5\"\n\t\t\"note\" \"third\"\n\t}\n" +
+                "}\n";
+
+            var changes = VmfDiff.Compare(VmfDocument.Parse(Map(withFirst: true)), VmfDocument.Parse(Map(withFirst: false)));
+
+            var change = Assert.Single(changes);
+            Assert.Equal(VmfChangeKind.Removed, change.Kind);
+            Assert.Equal("world#1/solid#2", change.Path);
+        }
+
+        /// <summary>Repeats are numbered per id, in file order, so a pass can name the one it changed.</summary>
+        [Fact]
+        public void RepeatedIdsAreNumberedInFileOrder()
+        {
+            const string map = "world\n{\n\t\"id\" \"1\"\n" +
+                "\tsolid\n\t{\n\t\t\"id\" \"5\"\n\t}\n" +
+                "\tsolid\n\t{\n\t\t\"id\" \"6\"\n\t}\n" +
+                "\tsolid\n\t{\n\t\t\"id\" \"5\"\n\t}\n" +
+                "\tsolid\n\t{\n\t\t\"id\" \"5\"\n\t\t\"note\" \"x\"\n\t}\n" +
+                "}\n";
+
+            var before = VmfDocument.Parse(map);
+            var after = VmfDocument.Parse(map);
+            after.World.Children("solid").Last().Set("note", "y");
+
+            var change = Assert.Single(VmfDiff.Compare(before, after));
+            Assert.Equal("world#1/solid#5~2/note", change.Path);
+        }
+
         [Fact]
         public void IdenticalMapsHaveNoDiff()
         {

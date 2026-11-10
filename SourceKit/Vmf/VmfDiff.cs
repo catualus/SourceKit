@@ -8,7 +8,9 @@ namespace SourceKit.Vmf
 
     /// <summary>
     /// One difference between two maps. <see cref="Path"/> names where it is, block by block, using ids
-    /// where the block has one: <c>world/solid#41/side#200/material</c>.
+    /// where the block has one: <c>world/solid#41/side#200/material</c>. A block without an id is named by
+    /// its position among blocks of its name, <c>versioninfo[0]</c>; a block repeating an id its parent
+    /// already used gets <c>~1</c>, <c>~2</c> and so on after it, numbered per id in file order.
     /// </summary>
     public sealed record VmfChange(VmfChangeKind Kind, string Path, string? Before, string? After)
     {
@@ -91,11 +93,22 @@ namespace SourceKit.Vmf
             }
         }
 
-        /// <summary>Each child block under a key that identifies it: its id, or its position among blocks of its name.</summary>
+        /// <summary>
+        /// Each child block under a key that identifies it: its id, or its position among blocks of its
+        /// name.
+        ///
+        /// Ids are meant to be unique but real maps repeat them. A block whose key is already taken gets
+        /// <c>~1</c> for the first repeat, <c>~2</c> for the next, counted per key - <c>solid#5</c>,
+        /// <c>solid#5~1</c> - so same-id blocks pair up in the order they appear. Counting them any other
+        /// way, such as by how many siblings came before, makes the key of an untouched block change
+        /// when some other block earlier in the list is removed, and the diff then reports it as removed
+        /// and added again.
+        /// </summary>
         private static Dictionary<string, VmfNode> Keyed(VmfNode node)
         {
             var result = new Dictionary<string, VmfNode>(StringComparer.OrdinalIgnoreCase);
             var positions = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            var repeats = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
             foreach (var child in node.Nodes)
             {
                 string key;
@@ -108,9 +121,13 @@ namespace SourceKit.Vmf
                     key = $"{child.Name}[{position}]";
                 }
 
-                // Two blocks with the same id would collide; keep both by position instead.
+                // Two blocks with the same id would collide; keep both, numbering the repeats.
                 if (!result.TryAdd(key, child))
-                    result[$"{key}~{result.Count}"] = child;
+                {
+                    repeats.TryGetValue(key, out int repeat);
+                    repeats[key] = ++repeat;
+                    result[$"{key}~{repeat}"] = child;
+                }
             }
             return result;
         }
