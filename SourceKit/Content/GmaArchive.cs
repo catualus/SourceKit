@@ -95,7 +95,11 @@ namespace SourceKit
 
             foreach (var (name, size) in found)
             {
-                if (at + size > stream.Length) break;
+                // Compared by subtraction, which cannot overflow: a size near long.MaxValue from a
+                // damaged or hostile index made at + size wrap negative and pass, and the body read
+                // later threw OverflowException out of a parallel model load. Bodies are read into one
+                // array each, so anything an array cannot hold is refused here too.
+                if (size > stream.Length - at || size > Array.MaxLength) break;
 
                 entries[name] = new Entry(at, size);
                 at += size;
@@ -130,7 +134,8 @@ namespace SourceKit
             {
                 body ??= File.OpenRead(path);
 
-                if (entry.Offset + entry.Length > body.Length) return false;
+                if (entry.Offset < 0 || entry.Length > body.Length - entry.Offset || entry.Length > Array.MaxLength)
+                    return false;
 
                 var buffer = new byte[entry.Length];
 

@@ -14,9 +14,25 @@ own self-contained executable.
 | BSP | `BspFile`, `BspVisibilityData`, `LzmaLump` | Entities, planes, texinfo, texdata, models, brushes and brush sides; the decoded PVS, leaves, leaf faces, face triangle counts, areas and areaportal numbers; with per-lump LZMA decompression |
 | Compile output | `PortalFile`, `PointFile` | VBSP's `.prt` portal file and `.lin` leak pointfile |
 | Map source | `VmfDocument`, `VmfBrush`, `VmfDiff`, `VmfRelocation` | A lossless VMF tree, brush geometry built from the plane points, a semantic diff of two maps, and moving a map without losing its instances |
-| Game content | `GameFiles`, `GameInfo`, `VpkArchive`, `GmaArchive`, `StudioModel` | Content a map can see, in the engine's search order: its pakfile, loose files, Garry's Mod addons, then VPKs; MDL headers |
+| Game content | `GameFiles`, `GameInfo`, `VpkArchive`, `GmaArchive`, `StudioModel` | Content a map can see, in the engine's search order: its pakfile (LZMA-repacked ones included), loose files, Garry's Mod addons, then VPKs; MDL headers |
 
 Parallel work obeys `SourceKitConcurrency`, which a tool forwards its own `-threads` and Ctrl+C to.
+
+### Where `GameFiles` looks
+
+`GameFiles.Open` works out the install from the map's own path, so the ordinary case needs no
+configuration:
+
+- The mod directory is the nearest folder at or above the map holding a `gameinfo.txt`. A map in
+  `garrysmod/maps`, `garrysmod/addons/<addon>/maps` or `garrysmod/download/maps` all find `garrysmod`.
+  A map in an addon's or `download`'s `maps` folder also searches that folder first, for its own content.
+- The mod's `gameinfo.txt` search paths, its `addons`, and Workshop `.gma` files under `cache/workshop`
+  and Steam's `workshop/content/4000`.
+- Other games Garry's Mod mounts, after all of its own content: folders named in `cfg/mount.cfg`, and
+  games ticked in the mount menu (`cfg/mountdepots.txt`), found through Steam's `libraryfolders.vdf` and
+  each game's app manifest.
+- Folders named with `extraRoots` or `GameFiles.AdditionalRoots`, for a map outside any install. A
+  trailing slash on one makes no difference.
 
 ## Rules
 

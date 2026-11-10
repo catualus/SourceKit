@@ -140,9 +140,10 @@ namespace SourceKit
 
         /// <summary>
         /// A displacement's surface: its base quad turned so the first corner is the start position, a grid
-        /// of 2^power + 1 points a side laid across it, each pushed out by its offset vector times distance.
+        /// of 2^power + 1 points a side laid across it, each pushed out by its offset vector times distance,
+        /// and each cell of the grid cut into two triangles on alternating diagonals.
         /// </summary>
-        private static void AddDisplacement(List<Vec3> quad, byte[] info, int at, byte[] verts, int face, bool block,
+        internal static void AddDisplacement(List<Vec3> quad, byte[] info, int at, byte[] verts, int face, bool block,
             List<Vec3> corners, List<int> faceOf, List<bool> blocks)
         {
             var start = new Vec3(BitConverter.ToSingle(info, at), BitConverter.ToSingle(info, at + 4), BitConverter.ToSingle(info, at + 8));
@@ -182,8 +183,21 @@ namespace SourceKit
                     var p01 = grid[i * n + j + 1];
                     var p10 = grid[(i + 1) * n + j];
                     var p11 = grid[(i + 1) * n + j + 1];
-                    corners.Add(p00); corners.Add(p10); corners.Add(p11);
-                    corners.Add(p00); corners.Add(p11); corners.Add(p01);
+                    // Source splits the cells in a checkerboard, on the parity of the cell's first
+                    // vertex index - which, the grid being an odd number of points wide, is the parity
+                    // of i + j. Splitting every cell on the same diagonal puts half of all cells on the
+                    // wrong surface, by tens of units on coarse terrain. The winding is the same either
+                    // way, so faces keep facing the way the BSP's own triangles do.
+                    if (((i + j) & 1) == 0)
+                    {
+                        corners.Add(p00); corners.Add(p10); corners.Add(p11);
+                        corners.Add(p00); corners.Add(p11); corners.Add(p01);
+                    }
+                    else
+                    {
+                        corners.Add(p00); corners.Add(p10); corners.Add(p01);
+                        corners.Add(p10); corners.Add(p11); corners.Add(p01);
+                    }
                     faceOf.Add(face); faceOf.Add(face);
                     blocks.Add(block); blocks.Add(block);
                 }

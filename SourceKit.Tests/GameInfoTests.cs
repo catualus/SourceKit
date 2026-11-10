@@ -70,6 +70,23 @@ namespace SourceKit.Tests
             Assert.Contains(Path.GetFullPath(Path.Combine(install, "sourceengine")), Paths(Real));
         }
 
+        /// <summary>
+        /// A mod path given with a trailing separator, as a -content path often is. The parent of
+        /// <c>garrysmod/</c> is <c>garrysmod</c> itself, so without trimming it the install root became
+        /// the mod and sourceengine and platform resolved to folders inside it that do not exist.
+        /// </summary>
+        [Theory]
+        [InlineData('/')]
+        [InlineData('\\')]
+        public void ATrailingSeparatorOnTheModPathChangesNothing(char separator)
+        {
+            var expected = Paths(Real);
+            var actual = GameInfo.Parse(Real, Mod + separator).Select(m => m.Path).ToArray();
+
+            Assert.Equal(expected, actual);
+            Assert.Contains(Path.GetFullPath(Path.Combine(install, "sourceengine", "hl2_misc.vpk")), actual);
+        }
+
         /// <summary>A bare entry is relative to the install root, not to the mod directory.</summary>
         [Fact]
         public void ABareEntryIsRelativeToTheInstallRoot()

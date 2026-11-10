@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Linq;
 using System.Text;
 using Xunit;
 
@@ -36,6 +37,10 @@ namespace SourceKit.Tests
 
         /// <summary>Builds an addon holding the given files, in the order given.</summary>
         private string Write(int version, params (string Path, string Body)[] files)
+            => Write(version, files.Select(f => (f.Path, (long)f.Body.Length, f.Body)).ToArray());
+
+        /// <summary>Builds an addon whose index declares the given sizes, whatever the bodies really are.</summary>
+        private string Write(int version, (string Path, long Size, string Body)[] files)
         {
             using var ms = new MemoryStream();
             using var w = new BinaryWriter(ms);
@@ -56,13 +61,13 @@ namespace SourceKit.Tests
             {
                 w.Write((uint)(i + 1));
                 WriteString(w, files[i].Path);
-                w.Write((long)files[i].Body.Length);
+                w.Write(files[i].Size);
                 w.Write(0u);                    // crc, not checked
             }
 
             w.Write(0u);                        // index terminator
 
-            foreach (var (_, body) in files)
+            foreach (var (_, _, body) in files)
                 w.Write(Encoding.ASCII.GetBytes(body));
 
             File.WriteAllBytes(path, ms.ToArray());
@@ -140,6 +145,29 @@ namespace SourceKit.Tests
             {
                 Assert.False(gma.TryRead("models/b.phy", out _));
                 gma.Dispose();
+            }
+        }
+
+        /// <summary>
+        /// A size near long.MaxValue in the index. Adding it to an offset wrapped negative, the entry was
+        /// accepted, and reading it threw OverflowException out of a parallel model load instead of
+        /// costing just that one addon.
+        /// </summary>
+        [Theory]
+        [InlineData(long.MaxValue)]
+        [InlineData(long.MaxValue - 100)]
+        [InlineData((long)int.MaxValue + 1)]
+        public void AnImpossibleSizeInTheIndexIsRefusedWithoutThrowing(long size)
+        {
+            Write(3, [("models/huge.phy", size, "HUGE"), ("models/after.phy", 2, "OK")]);
+
+            using var gma = GmaArchive.TryOpen(path);
+
+            if (gma is not null)
+            {
+                Assert.False(gma.TryRead("models/huge.phy", out var bytes));
+                Assert.Empty(bytes);
+                Assert.False(gma.TryRead("models/after.phy", out _));
             }
         }
     }
