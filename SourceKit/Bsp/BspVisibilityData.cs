@@ -172,12 +172,18 @@ namespace SourceKit
             var (propModels, props, propLeaves) = ReadStaticProps(r, offsets[LumpGame], lengths[LumpGame]);
             var portalNumbers = PortalNumbers(entities);
 
+            // Counted from the lumps as read, not from the lump table: on a compressed map the table
+            // gives the size on disk, which undercounts by the compression ratio (20 areas for 70 on
+            // the shipped rp_downtown_meowy).
+            var areas = Lump(LumpAreas);
+            var areaPortals = Lump(LumpAreaPortals);
+
             return new BspVisibilityData(clusters, rows, leaves, faces, leafFaces,
-                lengths[LumpAreas] / 8, lengths[LumpAreaPortals] / 12,
+                areas.Length / 8, areaPortals.Length / 12,
                 portalNumbers.Count == 0 ? 0 : portalNumbers.Max(), portalNumbers.Count)
             {
-                AreaPortalLinks = ReadAreaPortalLinks(Lump(LumpAreas), Lump(LumpAreaPortals)),
-                AreaPortalPolygons = ReadAreaPortalPolygons(Lump(LumpAreaPortals), Lump(LumpClipPortalVerts)),
+                AreaPortalLinks = ReadAreaPortalLinks(areas, areaPortals),
+                AreaPortalPolygons = ReadAreaPortalPolygons(areaPortals, Lump(LumpClipPortalVerts)),
                 AreaPortalEntities = ReadAreaPortalEntities(entities),
                 StaticPropModels = propModels,
                 StaticProps = props,
@@ -357,6 +363,9 @@ namespace SourceKit
         /// The static prop game lump ('sprp'): model names of 128 bytes, the leaf list, then the props.
         /// Every version keeps the first leaf and leaf count at the same place in a prop, after its
         /// origin, angles and type; the size of a prop is what the lump has left over each.
+        ///
+        /// A compressed map (flag 1) compresses each game lump on its own, LZMA-tagged like any other
+        /// lump; its directory entry's size is the decompressed size, and the tag carries the rest.
         /// </summary>
         private static (string[] Models, BspStaticProp[] Props, ushort[] Leaves) ReadStaticProps(BinaryReader r, int offset, int length)
         {
@@ -370,11 +379,22 @@ namespace SourceKit
                 ushort flags = r.ReadUInt16();
                 r.ReadUInt16(); // version
                 int at = r.ReadInt32(), size = r.ReadInt32();
-                if (id != 0x73707270 || (flags & 1) != 0 || size < 12)
+                if (id != 0x73707270 || size < 12)
                     continue;
-                var bytes = new byte[size];
-                r.BaseStream.Position = at;
-                r.BaseStream.ReadExactly(bytes);
+                byte[] bytes;
+                if ((flags & 1) != 0)
+                {
+                    bytes = LzmaLump.Read(r, at, size);
+                    size = bytes.Length;
+                    if (size < 12)
+                        return ([], [], []);
+                }
+                else
+                {
+                    bytes = new byte[size];
+                    r.BaseStream.Position = at;
+                    r.BaseStream.ReadExactly(bytes);
+                }
                 int p = 0;
                 int names = BitConverter.ToInt32(bytes, p); p += 4;
                 if (names < 0 || p + names * 128L > size)

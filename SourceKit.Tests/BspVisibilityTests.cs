@@ -171,6 +171,86 @@ namespace SourceKit.Tests
         private static byte[] I32(int value) => BitConverter.GetBytes(value);
         private static byte[] V(float x, float y, float z) => Concat(BitConverter.GetBytes(x), BitConverter.GetBytes(y), BitConverter.GetBytes(z));
 
+        /// <summary>
+        /// A lump compressed the way VBSP's optional LZMA compression stores it: "LZMA", the
+        /// decompressed and compressed sizes, the five property bytes, then the LZMA stream.
+        /// </summary>
+        internal static byte[] Compress(byte[] data)
+        {
+            using var packed = new MemoryStream();
+            byte[] properties;
+            using (var encoder = SharpCompress.Compressors.LZMA.LzmaStream.Create(
+                SharpCompress.Compressors.LZMA.LzmaEncoderProperties.Default, false, packed))
+            {
+                encoder.Write(data, 0, data.Length);
+                properties = encoder.Properties;
+            }
+            var stream = packed.ToArray();
+            return Concat("LZMA"u8.ToArray(), I32(data.Length), I32(stream.Length), properties, stream);
+        }
+
+        [Fact]
+        public void ACompressedLumpReadsBackAsItWasWritten()
+        {
+            var data = Enumerable.Range(0, 3000).Select(i => (byte)(i * 7 % 251)).ToArray();
+            var lump = Compress(data);
+            using var reader = new BinaryReader(new MemoryStream(Concat(new byte[5], lump)));
+
+            Assert.Equal(data, LzmaLump.Read(reader, 5, lump.Length));
+        }
+
+        /// <summary>
+        /// A map compiled with LZMA-compressed lumps, as a shipped map is. The static props sit in a
+        /// game lump compressed on its own (flag 1), which used to be skipped, and the area counts came
+        /// from the on-disk sizes in the lump table, which undercount or overcount by the compression.
+        /// </summary>
+        [Fact]
+        public void ACompressedMapHasItsStaticPropsAndTrueAreaCounts()
+        {
+            string path = Temp();
+            try
+            {
+                // Three areas joined by portal 1 as in the test above, padded out with empty ones so the
+                // compressed lumps are clearly smaller than the real ones: 20 areas, 22 portal entries.
+                var areas = Concat(I32(0), I32(0), I32(1), I32(0), I32(1), I32(1), new byte[17 * 8]);
+                var portals = Concat(U16(1), U16(2), U16(0), U16(4), I32(0), U16(1), U16(1), U16(0), U16(4), I32(0), new byte[20 * 12]);
+                var verts = Concat(V(0, 0, 0), V(0, 64, 0), V(0, 64, 96), V(0, 0, 96));
+                var compressedAreas = Compress(areas);
+                var compressedPortals = Compress(portals);
+                Assert.NotEqual(areas.Length / 8, compressedAreas.Length / 8);
+                Assert.NotEqual(portals.Length / 12, compressedPortals.Length / 12);
+
+                byte[] Game(int at)
+                {
+                    var name = new byte[128];
+                    System.Text.Encoding.ASCII.GetBytes("models/props_c17/chair.mdl").CopyTo(name, 0);
+                    var prop = new byte[60];
+                    BitConverter.GetBytes((ushort)0).CopyTo(prop, 24);
+                    BitConverter.GetBytes((ushort)1).CopyTo(prop, 26);
+                    BitConverter.GetBytes((ushort)2).CopyTo(prop, 28);
+                    var sprp = Concat(I32(1), name, I32(3), U16(9), U16(2), U16(3), I32(1), prop);
+                    // Flag 1, compressed; the directory gives the decompressed size, the tag the rest.
+                    return Concat(I32(1), I32(0x73707270), U16(1), U16(5), I32(at + 4 + 16), I32(sprp.Length), Compress(sprp));
+                }
+                WriteTinyBsp(path, entities: "{\n\"classname\" \"func_areaportal\"\n\"portalnumber\" \"1\"\n}\n",
+                    extra: new() { [20] = compressedAreas, [21] = compressedPortals, [41] = verts }, gameLump: Game);
+
+                var bsp = BspVisibilityData.Load(path);
+
+                Assert.Equal(20, bsp.AreaCount);
+                Assert.Equal(22, bsp.AreaPortalCount);
+                var (a, b) = bsp.AreaPortalLinks[1];
+                Assert.Equal([1, 2], new[] { a, b }.Order());
+                Assert.Equal(["models/props_c17/chair.mdl"], bsp.StaticPropModels);
+                var placed = Assert.Single(bsp.StaticProps);
+                Assert.Equal([2, 3], bsp.StaticPropLeaves.Skip(placed.FirstLeaf).Take(placed.LeafCount).Select(l => (int)l));
+            }
+            finally
+            {
+                File.Delete(path);
+            }
+        }
+
         [Fact]
         public void ARunOfZeroesExpandsToEmptyBytes()
         {
