@@ -87,7 +87,20 @@ namespace SourceKit
 
             var decoder = new Decoder();
             decoder.SetDecoderProperties(properties);
-            decoder.Code(source, destination, compressedSize, decompressedSize, null);
+            try
+            {
+                decoder.Code(source, destination, compressedSize, decompressedSize, null);
+            }
+            catch (Exception ex) when (ex is not (InvalidDataException or OutOfMemoryException))
+            {
+                // A stream that runs out before the declared size, or is damaged, fails inside the
+                // decoder with the decoder's own exception type, which SharpCompress does not even make
+                // public. Callers handle a bad map by catching InvalidDataException, which is what every
+                // other malformed lump gives them. Everything the decoder reads came off the disk, so
+                // whatever it throws is about the data.
+                throw new InvalidDataException(
+                    $"lump at offset {offset} is not a valid LZMA stream for the {decompressedSize:N0} bytes its header declares", ex);
+            }
 
             var expanded = destination.ToArray();
 
