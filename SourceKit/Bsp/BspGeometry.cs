@@ -48,19 +48,8 @@ namespace SourceKit
         {
             using var stream = File.OpenRead(path);
             using var r = new BinaryReader(stream, Encoding.ASCII);
-            if (r.ReadInt32() != 0x50534256)
-                throw new InvalidDataException($"{path} is not a Source BSP.");
-            r.ReadInt32();
-            var offsets = new int[64];
-            var lengths = new int[64];
-            for (int i = 0; i < 64; i++)
-            {
-                offsets[i] = r.ReadInt32();
-                lengths[i] = r.ReadInt32();
-                r.ReadInt32();
-                r.ReadInt32();
-            }
-            byte[] Lump(int index) => lengths[index] <= 0 ? [] : LzmaLump.Read(r, offsets[index], lengths[index]);
+            var header = BspHeader.Read(r, path);
+            byte[] Lump(int index) => header.ReadLump(r, index);
 
             var texinfo = Lump(LumpTexinfo);
             var faces = Lump(LumpFaces);

@@ -457,16 +457,10 @@ namespace SourceKit
                 file = new FileStream(bspPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
                 using var r = new BinaryReader(file, System.Text.Encoding.ASCII, leaveOpen: true);
 
-                r.BaseStream.Seek(8, SeekOrigin.Begin);
-
-                int offset = 0, length = 0;
-                for (int i = 0; i < BspFile.HeaderLumps; i++)
-                {
-                    int o = r.ReadInt32(), l = r.ReadInt32();
-                    r.ReadInt32(); r.ReadInt32();
-
-                    if (i == LumpPakfile) { offset = o; length = l; }
-                }
+                // A file that is not a BSP we read throws here, and is treated like any other pakfile
+                // that will not open: the map's packed content is lost, the rest of the lookup is not.
+                var header = BspHeader.Read(r, bspPath);
+                int offset = header[LumpPakfile].Offset, length = header[LumpPakfile].Length;
 
                 if (length <= 0 || offset < 0 || offset >= file.Length) return;
 

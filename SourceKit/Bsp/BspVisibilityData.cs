@@ -132,28 +132,14 @@ namespace SourceKit
         {
             using var stream = File.OpenRead(path);
             using var r = new BinaryReader(stream, Encoding.ASCII);
+            var header = BspHeader.Read(r, path);
 
-            if (r.ReadInt32() != 0x50534256)
-                throw new InvalidDataException($"{path} is not a Source BSP.");
-            r.ReadInt32(); // version
-
-            var offsets = new int[64];
-            var lengths = new int[64];
-            var versions = new int[64];
-            for (int i = 0; i < 64; i++)
-            {
-                offsets[i] = r.ReadInt32();
-                lengths[i] = r.ReadInt32();
-                versions[i] = r.ReadInt32();
-                r.ReadInt32();
-            }
-
-            byte[] Lump(int index) => lengths[index] <= 0 ? [] : LzmaLump.Read(r, offsets[index], lengths[index]);
+            byte[] Lump(int index) => header.ReadLump(r, index);
 
             var texFlags = ReadTexinfoFlags(Lump(LumpTexinfo));
             var dispPowers = ReadDispPowers(Lump(LumpDispInfo));
             var faces = ReadFaces(Lump(LumpFaces), texFlags, dispPowers);
-            var leaves = ReadLeaves(Lump(LumpLeafs), versions[LumpLeafs]);
+            var leaves = ReadLeaves(Lump(LumpLeafs), header[LumpLeafs].Version);
             var leafFaces = ReadUShorts(Lump(LumpLeafFaces));
             var (clusters, rows) = ReadPvs(Lump(LumpVisibility));
 
@@ -169,7 +155,7 @@ namespace SourceKit
                     throw new InvalidDataException($"A leaf lists face {face}, but the map has {faces.Length}.");
 
             string entities = Encoding.Latin1.GetString(Lump(LumpEntities));
-            var (propModels, props, propLeaves) = ReadStaticProps(r, offsets[LumpGame], lengths[LumpGame]);
+            var (propModels, props, propLeaves) = ReadStaticProps(r, header[LumpGame].Offset, header[LumpGame].Length);
             var portalNumbers = PortalNumbers(entities);
 
             // Counted from the lumps as read, not from the lump table: on a compressed map the table

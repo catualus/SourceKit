@@ -29,6 +29,14 @@ namespace SourceKit.Vmf
     /// there, some blocks added. Checking that promise against a text diff is unreliable, since the
     /// same edit can move lines around; this compares the trees, pairing blocks by their id where
     /// they have one and by position among same-named siblings where they do not.
+    ///
+    /// Two maps being compared are nearly always one map and an edited copy of it, so nearly every
+    /// block lines up with the block at the same place on the other side and is unchanged. That case is
+    /// checked first, in order and without allocating: blocks whose keys and children match one for one
+    /// are skipped outright, and keys that match one for one are compared by position. Only where that
+    /// fails - a block added or removed, a key repeated - are the blocks grouped and keyed, and the
+    /// grouping is the one that decides the paths and the pairing of repeated ids, so the result is the
+    /// same as if every block had been grouped.
     /// </summary>
     public static class VmfDiff
     {
@@ -43,16 +51,23 @@ namespace SourceKit.Vmf
         {
             CompareKeys(a, b, path, changes);
 
+            // Every child the same as the one at the same place on the other side: nothing below here
+            // can differ, and grouping would pair each child with that same one.
+            if (SameChildren(a, b))
+                return;
+
             var left = Keyed(a);
             var right = Keyed(b);
 
             foreach (var (key, node) in left)
             {
-                string childPath = Join(path, key);
                 if (right.TryGetValue(key, out var other))
-                    CompareNodes(node, other, childPath, changes);
+                {
+                    if (!Same(node, other))
+                        CompareNodes(node, other, Join(path, key), changes);
+                }
                 else
-                    changes.Add(new VmfChange(VmfChangeKind.Removed, childPath, null, null));
+                    changes.Add(new VmfChange(VmfChangeKind.Removed, Join(path, key), null, null));
             }
 
             foreach (var (key, _) in right)
@@ -60,7 +75,117 @@ namespace SourceKit.Vmf
                     changes.Add(new VmfChange(VmfChangeKind.Added, Join(path, key), null, null));
         }
 
+        /// <summary>
+        /// Whether nothing in or under the two blocks differs: the same keys with the same values in the
+        /// same order, and children that are the same, block for block. When this holds, grouping finds
+        /// no change either: the children have the same names and ids in the same order, so they get the
+        /// same keys on both sides and pair one for one.
+        /// </summary>
+        private static bool Same(VmfNode a, VmfNode b)
+        {
+            List<VmfItem> left = a.ItemList, right = b.ItemList;
+            int i = 0, j = 0;
+            while (true)
+            {
+                var x = NextPair(left, ref i);
+                var y = NextPair(right, ref j);
+                if (x == null || y == null)
+                {
+                    if (x != y)
+                        return false;
+                    break;
+                }
+                if (!string.Equals(x.Key, y.Key, StringComparison.Ordinal) || !string.Equals(x.Value, y.Value, StringComparison.Ordinal))
+                    return false;
+            }
+            return SameChildren(a, b);
+        }
+
+        /// <summary>
+        /// Whether the child blocks match one for one: the same name, and <see cref="Same"/>. Same keys
+        /// with the same values means the same id, so the same key when grouped.
+        /// </summary>
+        private static bool SameChildren(VmfNode a, VmfNode b)
+        {
+            List<VmfItem> left = a.ItemList, right = b.ItemList;
+            int i = 0, j = 0;
+            while (true)
+            {
+                var x = NextNode(left, ref i);
+                var y = NextNode(right, ref j);
+                if (x == null || y == null)
+                    return x == y;
+                if (!string.Equals(x.Name, y.Name, StringComparison.Ordinal) || !Same(x, y))
+                    return false;
+            }
+        }
+
         private static void CompareKeys(VmfNode a, VmfNode b, string path, List<VmfChange> changes)
+        {
+            // In order first. The same keys in the same order, none repeated, pair by position exactly as
+            // grouping pairs them, and an unchanged block - nearly all of them - costs no allocation.
+            List<VmfItem> left = a.ItemList, right = b.ItemList;
+            int i = 0, j = 0, count = 0;
+            bool sameValues = true;
+            while (true)
+            {
+                var x = NextPair(left, ref i);
+                var y = NextPair(right, ref j);
+                if (x == null || y == null)
+                {
+                    if (x != y)
+                    {
+                        CompareKeysGrouped(a, b, path, changes);
+                        return;
+                    }
+                    break;
+                }
+                if (!string.Equals(x.Key, y.Key, StringComparison.Ordinal))
+                {
+                    CompareKeysGrouped(a, b, path, changes);
+                    return;
+                }
+                sameValues &= string.Equals(x.Value, y.Value, StringComparison.Ordinal);
+                count++;
+            }
+
+            if (sameValues)
+                return;
+
+            // A repeated key is numbered by occurrence and reported grouped by key, not in file order.
+            if (HasRepeatedKey(left, count))
+            {
+                CompareKeysGrouped(a, b, path, changes);
+                return;
+            }
+
+            i = j = 0;
+            while (NextPair(left, ref i) is { } x && NextPair(right, ref j) is { } y)
+                if (!string.Equals(x.Value, y.Value, StringComparison.Ordinal))
+                    changes.Add(new VmfChange(VmfChangeKind.ValueChanged, Join(path, x.Key), x.Value, y.Value));
+        }
+
+        /// <summary>
+        /// Whether any key appears twice among a block's <paramref name="count"/> pairs, compared as
+        /// grouping compares them. A block with many pairs is taken to have one, which costs only the
+        /// fast path.
+        /// </summary>
+        private static bool HasRepeatedKey(List<VmfItem> items, int count)
+        {
+            if (count > 64)
+                return true;
+            int i = 0;
+            while (NextPair(items, ref i) is { } x)
+            {
+                int j = i;
+                while (NextPair(items, ref j) is { } y)
+                    if (string.Equals(x.Key, y.Key, StringComparison.OrdinalIgnoreCase))
+                        return true;
+            }
+            return false;
+        }
+
+        private static void CompareKeysGrouped(VmfNode a, VmfNode b, string path, List<VmfChange> changes)
         {
             // Keys can repeat (an entity's outputs, a displacement's rows), so pair them by occurrence.
             var left = a.KeyValues.GroupBy(kv => kv.Key, StringComparer.OrdinalIgnoreCase)
@@ -130,6 +255,24 @@ namespace SourceKit.Vmf
                 }
             }
             return result;
+        }
+
+        /// <summary>The next key-value pair at or after <paramref name="at"/>, moving past it; null at the end.</summary>
+        private static VmfKeyValue? NextPair(List<VmfItem> items, ref int at)
+        {
+            while (at < items.Count)
+                if (items[at++] is VmfKeyValue pair)
+                    return pair;
+            return null;
+        }
+
+        /// <summary>The next child block at or after <paramref name="at"/>, moving past it; null at the end.</summary>
+        private static VmfNode? NextNode(List<VmfItem> items, ref int at)
+        {
+            while (at < items.Count)
+                if (items[at++] is VmfNode node)
+                    return node;
+            return null;
         }
 
         private static string Join(string path, string part) => path.Length == 0 ? part : path + "/" + part;
