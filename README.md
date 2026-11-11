@@ -11,12 +11,18 @@ own self-contained executable.
 
 | Area | Types | Reads |
 | --- | --- | --- |
-| BSP | `BspFile`, `BspVisibilityData`, `LzmaLump` | Entities, planes, texinfo, texdata, models, brushes and brush sides; the decoded PVS, leaves, leaf faces, face triangle counts, areas and areaportal numbers; with per-lump LZMA decompression |
+| BSP | `BspFile`, `BspSpace`, `BspGeometry`, `BspVisibilityData`, `LzmaLump` | Entities, planes, texinfo, texdata, models, brushes and brush sides; the BSP tree as space (leaf, area and solidity of a point); the world's faces and displacements as triangles; the decoded PVS, leaves, leaf faces, face triangle counts, areas and areaportal numbers; with per-lump LZMA decompression |
 | Compile output | `PortalFile`, `PointFile` | VBSP's `.prt` portal file and `.lin` leak pointfile |
-| Map source | `VmfDocument`, `VmfBrush`, `VmfDiff`, `VmfRelocation` | A lossless VMF tree, brush geometry built from the plane points, a semantic diff of two maps, and moving a map without losing its instances |
+| Map source | `VmfDocument`, `VmfBrush`, `VmfDiff`, `VmfRelocation` | A lossless VMF tree that copies without a re-parse (`Clone`) and numbers new blocks without a walk of the map per block (`NextIds`), brush geometry built from the plane points, a semantic diff of two maps, and moving a map without losing its instances |
 | Game content | `GameFiles`, `GameInfo`, `VpkArchive`, `GmaArchive`, `StudioModel` | Content a map can see, in the engine's search order: its pakfile (LZMA-repacked ones included), loose files, Garry's Mod addons, then VPKs; MDL headers |
 
 Parallel work obeys `SourceKitConcurrency`, which a tool forwards its own `-threads` and Ctrl+C to.
+
+Every BSP reader, and the pakfile lookup in `GameFiles`, reads the header through one parser. It takes
+the `VBSP` ident and versions 19 to 21, and refuses anything else with an "unsupported BSP
+version/layout" error - Left 4 Dead 2's version-first lump table included, which would otherwise read
+as garbage. `GameFiles` treats a refused map like a damaged pakfile: its packed content is skipped,
+nothing else is.
 
 ### Where `GameFiles` looks
 
