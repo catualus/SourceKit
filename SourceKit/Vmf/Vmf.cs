@@ -39,35 +39,55 @@ namespace SourceKit.Vmf
         {
             bool bom = bytes.Length >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF;
             // Latin-1 maps every byte to one char and back, so text the map holds in any other
-            // encoding - a Windows-1252 entity name, say - survives a round trip untouched.
-            string text = Encoding.Latin1.GetString(bytes, bom ? 3 : 0, bytes.Length - (bom ? 3 : 0));
-            return Parse(text, bom);
+            // encoding - a Windows-1252 entity name, say - survives a round trip untouched. Decoded a
+            // line at a time: the same text, without first holding the whole map as one string.
+            return Parse(SplitKeepingTerminators(bytes, bom ? 3 : 0), bom);
         }
 
-        public static VmfDocument Parse(string text, bool byteOrderMark = false)
+        public static VmfDocument Parse(string text, bool byteOrderMark = false) =>
+            Parse(SplitKeepingTerminators(text), byteOrderMark);
+
+        /// <summary>
+        /// The parser proper. Each line is kept as it was read, and only that line, its key and its value
+        /// are allocated: the trimming that decides what a line is happens on spans, and block names and
+        /// keys - a few dozen distinct strings repeated a million times in a large map - are shared.
+        /// </summary>
+        private static VmfDocument Parse(IEnumerable<string> lines, bool byteOrderMark)
         {
             var root = new VmfNode("", null, headerLine: null, openLine: null);
             var stack = new Stack<VmfNode>();
             stack.Push(root);
+
+            var names = new HashSet<string>(StringComparer.Ordinal);
+            var interned = names.GetAlternateLookup<ReadOnlySpan<char>>();
+            string Intern(ReadOnlySpan<char> text)
+            {
+                if (!interned.TryGetValue(text, out string? existing))
+                {
+                    existing = text.ToString();
+                    names.Add(existing);
+                }
+                return existing;
+            }
 
             int crlf = 0, lf = 0;
             string? pendingName = null;
             string? pendingNameLine = null;
             int lineNumber = 0;
 
-            foreach (string line in SplitKeepingTerminators(text))
+            foreach (string line in lines)
             {
                 lineNumber++;
-                if (line.EndsWith("\r\n", StringComparison.Ordinal)) crlf++;
-                else if (line.EndsWith('\n')) lf++;
+                if (line.Length >= 2 && line[^1] == '\n' && line[^2] == '\r') crlf++;
+                else if (line.Length >= 1 && line[^1] == '\n') lf++;
 
-                string content = line.TrimEnd('\r', '\n');
-                string trimmed = content.Trim();
+                // Line breaks are white space, so this is the line without its terminator, trimmed.
+                ReadOnlySpan<char> trimmed = line.AsSpan().Trim();
                 var current = stack.Peek();
 
                 if (pendingName != null)
                 {
-                    if (trimmed != "{")
+                    if (trimmed is not "{")
                         throw new InvalidDataException($"Line {lineNumber}: expected '{{' after '{pendingName}', found '{trimmed}'.");
                     var node = new VmfNode(pendingName, current, pendingNameLine, line);
                     current.AddParsed(node);
@@ -81,7 +101,7 @@ namespace SourceKit.Vmf
                 {
                     current.AddParsed(new VmfTrivia(line));
                 }
-                else if (trimmed == "}")
+                else if (trimmed is "}")
                 {
                     if (stack.Count == 1)
                         throw new InvalidDataException($"Line {lineNumber}: '}}' with no block open.");
@@ -90,21 +110,21 @@ namespace SourceKit.Vmf
                 }
                 else if (trimmed[0] == '"')
                 {
-                    if (!TryParseKeyValue(trimmed, out string key, out string value))
+                    if (!TryParseKeyValue(trimmed, out var key, out var value))
                         throw new InvalidDataException($"Line {lineNumber}: cannot read a key-value pair from '{trimmed}'.");
-                    current.AddParsed(new VmfKeyValue(key, value, line));
+                    current.AddParsed(new VmfKeyValue(Intern(trimmed[key]), trimmed[value].ToString(), line));
                 }
                 else if (trimmed.EndsWith('{') && trimmed.Length > 1)
                 {
                     // "solid {" on one line. Hammer never writes this, but other tools do.
-                    string name = trimmed[..^1].Trim();
+                    string name = Intern(trimmed[..^1].Trim());
                     var node = new VmfNode(name, current, line, openLine: "");
                     current.AddParsed(node);
                     stack.Push(node);
                 }
                 else
                 {
-                    pendingName = trimmed;
+                    pendingName = Intern(trimmed);
                     pendingNameLine = line;
                 }
             }
@@ -123,7 +143,10 @@ namespace SourceKit.Vmf
         /// <summary>Every top-level entity, in file order.</summary>
         public IEnumerable<VmfNode> Entities => Root.Children("entity");
 
-        /// <summary>The largest "id" anywhere in the map, so new blocks can be given ids that collide with nothing.</summary>
+        /// <summary>
+        /// The largest "id" anywhere in the map, so new blocks can be given ids that collide with nothing.
+        /// This walks every block each time; to number many new blocks, use <see cref="NextIds"/>.
+        /// </summary>
         public long MaxId()
         {
             long max = 0;
@@ -132,6 +155,36 @@ namespace SourceKit.Vmf
                     max = id;
             return max;
         }
+
+        /// <summary>
+        /// Reserves <paramref name="count"/> consecutive ids and returns the first: the range is
+        /// <c>first</c> to <c>first + count - 1</c>. Each is above every id in the map and every id an
+        /// earlier call reserved, so a brush and its six sides cost one call, not a walk of the whole map
+        /// per brush as <see cref="MaxId"/> does.
+        ///
+        /// The map is walked once, on the first call. After that the document keeps count, and still
+        /// notices ids it did not hand out: a block added with ids already in it, or an "id" set on a
+        /// block in the map, moves the next range above them. An id given up - its block removed, or
+        /// reserved and never used - is not handed out again.
+        ///
+        /// Not safe to call from two threads at once, like any other edit to a document.
+        /// </summary>
+        public long NextIds(int count)
+        {
+            ArgumentOutOfRangeException.ThrowIfNegativeOrZero(count);
+            return Root.ReserveIds(count, MaxId);
+        }
+
+        /// <summary>
+        /// A deep copy, made without writing the map out and reading it back. The copy writes out exactly
+        /// as this document does, edits to either leave the other alone, and ids this document reserved
+        /// with <see cref="NextIds"/> stay reserved in the copy. Unchanged lines are shared rather than
+        /// copied: they are immutable strings, and most of a map's memory.
+        ///
+        /// Unlike a copy made by parsing <see cref="ToString"/>, an edited pair or added block is still
+        /// marked as one in the copy (<see cref="VmfKeyValue.IsModified"/>, <see cref="VmfNode.IsAdded"/>).
+        /// </summary>
+        public VmfDocument Clone() => new(Root.CloneTree(null), NewLine, HasByteOrderMark);
 
         public void Save(string path)
         {
@@ -156,39 +209,53 @@ namespace SourceKit.Vmf
             return builder.ToString();
         }
 
-        internal static bool TryParseKeyValue(string trimmed, out string key, out string value)
+        /// <summary>
+        /// Where the key and the value are in a trimmed line that starts with a quote, found without
+        /// allocating either.
+        /// </summary>
+        internal static bool TryParseKeyValue(ReadOnlySpan<char> trimmed, out Range key, out Range value)
         {
-            key = value = "";
-            int keyEnd = trimmed.IndexOf('"', 1);
-            if (keyEnd < 0)
+            key = value = default;
+            int keyEnd = trimmed[1..].IndexOf('"') + 1;
+            if (keyEnd < 1)
                 return false;
-            key = trimmed[1..keyEnd];
+            key = 1..keyEnd;
 
-            int valueStart = trimmed.IndexOf('"', keyEnd + 1);
+            int valueStart = trimmed[(keyEnd + 1)..].IndexOf('"');
             if (valueStart < 0)
                 return false;
+            valueStart += keyEnd + 1;
             // The value runs to the last quote on the line: Hammer does not escape quotes, so a value
             // that contains one would otherwise be cut short.
             int valueEnd = trimmed.LastIndexOf('"');
             if (valueEnd <= valueStart)
                 return false;
-            value = trimmed[(valueStart + 1)..valueEnd];
+            value = (valueStart + 1)..valueEnd;
             return true;
         }
 
         private static IEnumerable<string> SplitKeepingTerminators(string text)
         {
             int start = 0;
-            for (int i = 0; i < text.Length; i++)
+            while (start < text.Length)
             {
-                if (text[i] == '\n')
-                {
-                    yield return text[start..(i + 1)];
-                    start = i + 1;
-                }
+                int end = text.IndexOf('\n', start);
+                int next = end < 0 ? text.Length : end + 1;
+                yield return text[start..next];
+                start = next;
             }
-            if (start < text.Length)
-                yield return text[start..];
+        }
+
+        /// <summary>The lines <see cref="SplitKeepingTerminators(string)"/> gives, decoded from Latin-1 one at a time.</summary>
+        private static IEnumerable<string> SplitKeepingTerminators(byte[] bytes, int start)
+        {
+            while (start < bytes.Length)
+            {
+                int end = Array.IndexOf(bytes, (byte)'\n', start);
+                int next = end < 0 ? bytes.Length : end + 1;
+                yield return Encoding.Latin1.GetString(bytes, start, next - start);
+                start = next;
+            }
         }
     }
 
@@ -224,6 +291,8 @@ namespace SourceKit.Vmf
                     return;
                 this.value = value;
                 Raw = null;
+                if (Parent != null && VmfNode.IsIdKey(Key))
+                    Parent.NoteId(value);
             }
         }
 
@@ -244,6 +313,8 @@ namespace SourceKit.Vmf
 
         public bool IsModified => Raw == null;
 
+        internal VmfKeyValue CloneFor(VmfNode parent) => new(Key, value, Raw) { Parent = parent };
+
         public override string ToString() => $"\"{Key}\" \"{Value}\"";
     }
 
@@ -254,6 +325,12 @@ namespace SourceKit.Vmf
         private string? headerLine;
         private string? openLine;
         private string? closeLine;
+
+        /// <summary>
+        /// On a document's root, once <see cref="VmfDocument.NextIds"/> has run: every id at or below this
+        /// is in the map or has been handed out. Null until then, and on every other block.
+        /// </summary>
+        private long? idCeiling;
 
         public string Name { get; }
 
@@ -306,6 +383,8 @@ namespace SourceKit.Vmf
             // After the last pair and before the first child block, where Hammer writes keys.
             int index = items.FindLastIndex(i => i is VmfKeyValue) + 1;
             items.Insert(index, added);
+            if (IsIdKey(key))
+                NoteId(value);
         }
 
         /// <summary>
@@ -316,6 +395,8 @@ namespace SourceKit.Vmf
         {
             var added = new VmfKeyValue(key, value) { Parent = this };
             items.Insert(items.FindLastIndex(i => i is VmfKeyValue) + 1, added);
+            if (IsIdKey(key))
+                NoteId(value);
         }
 
         /// <summary>Adds a block just before <paramref name="before"/>, one of this block's own.</summary>
@@ -328,6 +409,7 @@ namespace SourceKit.Vmf
                 throw new ArgumentException($"'{before.Name}' is not in this block.", nameof(before));
             node.Parent = this;
             items.Insert(index, node);
+            NoteIdsOf(node);
         }
 
         /// <summary>Adds a block at the end of this one.</summary>
@@ -337,6 +419,7 @@ namespace SourceKit.Vmf
                 throw new InvalidOperationException($"'{node.Name}' already belongs to a block.");
             node.Parent = this;
             items.Add(node);
+            NoteIdsOf(node);
         }
 
         public bool Remove(VmfItem item)
@@ -360,6 +443,69 @@ namespace SourceKit.Vmf
         public string? Classname => Get("classname");
 
         public long? Id => long.TryParse(Get("id"), out long id) ? id : null;
+
+        internal static bool IsIdKey(string key) => string.Equals(key, "id", StringComparison.OrdinalIgnoreCase);
+
+        /// <summary>The top of the tree this block is in: a document's root, or the top of a detached block.</summary>
+        private VmfNode Top()
+        {
+            var top = this;
+            while (top.Parent != null)
+                top = top.Parent;
+            return top;
+        }
+
+        /// <summary>Reserves <paramref name="count"/> ids on this root, finding the largest with <paramref name="scan"/> the first time.</summary>
+        internal long ReserveIds(int count, Func<long> scan)
+        {
+            long ceiling = idCeiling ??= scan();
+            idCeiling = checked(ceiling + count);
+            return ceiling + 1;
+        }
+
+        /// <summary>An id has been written into this block: the tree's next reserved range must start above it.</summary>
+        internal void NoteId(string value)
+        {
+            var top = Top();
+            if (top.idCeiling is { } ceiling && long.TryParse(value, out long id) && id > ceiling)
+                top.idCeiling = id;
+        }
+
+        /// <summary><paramref name="node"/> has joined this tree, carrying whatever ids it already had.</summary>
+        private void NoteIdsOf(VmfNode node)
+        {
+            var top = Top();
+            if (top.idCeiling is not { } ceiling)
+                return;
+            long max = ceiling;
+            if (long.TryParse(node.Get("id"), out long own) && own > max)
+                max = own;
+            foreach (var inner in node.Descendants())
+                if (long.TryParse(inner.Get("id"), out long id) && id > max)
+                    max = id;
+            top.idCeiling = max;
+        }
+
+        /// <summary>A copy of this block and everything in it, sharing the immutable line strings.</summary>
+        internal VmfNode CloneTree(VmfNode? parent)
+        {
+            var copy = new VmfNode(Name, parent, headerLine, openLine) { closeLine = closeLine, idCeiling = idCeiling };
+            copy.items.Capacity = items.Count;
+            foreach (var item in items)
+            {
+                copy.items.Add(item switch
+                {
+                    VmfNode node => node.CloneTree(copy),
+                    VmfKeyValue pair => pair.CloneFor(copy),
+                    VmfTrivia trivia => new VmfTrivia(trivia.Raw) { Parent = copy },
+                    _ => throw new InvalidOperationException($"Unknown VMF item {item.GetType().Name}."),
+                });
+            }
+            return copy;
+        }
+
+        /// <summary>The list itself, for readers in this assembly that walk every block and must not allocate to do it.</summary>
+        internal List<VmfItem> ItemList => items;
 
         internal void AddParsed(VmfItem item)
         {
