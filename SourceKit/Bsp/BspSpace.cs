@@ -55,21 +55,8 @@ namespace SourceKit
         {
             using var stream = File.OpenRead(path);
             using var r = new BinaryReader(stream, Encoding.ASCII);
-            if (r.ReadInt32() != 0x50534256)
-                throw new InvalidDataException($"{path} is not a Source BSP.");
-            r.ReadInt32();
-
-            var offsets = new int[64];
-            var lengths = new int[64];
-            var versions = new int[64];
-            for (int i = 0; i < 64; i++)
-            {
-                offsets[i] = r.ReadInt32();
-                lengths[i] = r.ReadInt32();
-                versions[i] = r.ReadInt32();
-                r.ReadInt32();
-            }
-            byte[] Lump(int index) => lengths[index] <= 0 ? [] : LzmaLump.Read(r, offsets[index], lengths[index]);
+            var header = BspHeader.Read(r, path);
+            byte[] Lump(int index) => header.ReadLump(r, index);
 
             var planeBytes = Lump(LumpPlanes);
             var planes = new Plane3[planeBytes.Length / 20];
@@ -89,7 +76,7 @@ namespace SourceKit
             }
 
             var leafBytes = Lump(LumpLeafs);
-            int leafSize = versions[LumpLeafs] == 0 ? 56 : 32;
+            int leafSize = header[LumpLeafs].Version == 0 ? 56 : 32;
             var leaves = new (int, int, int, int, int)[leafBytes.Length / leafSize];
             for (int i = 0; i < leaves.Length; i++)
             {

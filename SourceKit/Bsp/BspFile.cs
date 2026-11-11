@@ -17,7 +17,7 @@ namespace SourceKit
     /// </summary>
     public sealed class BspFile
     {
-        public const int HeaderLumps = 64;
+        public const int HeaderLumps = BspHeader.LumpCount;
 
         // lump indices we care about
         private const int LumpEntities = 0;
@@ -49,44 +49,25 @@ namespace SourceKit
         /// <summary>Material names, indexed the same as <see cref="TexDatas"/> via NameStringTableId.</summary>
         public string[] MaterialNames { get; private set; } = [];
 
-        private readonly LumpEntry[] lumps = new LumpEntry[HeaderLumps];
+        private BspHeader header = null!;
 
-        private struct LumpEntry
-        {
-            public int Offset;
-            public int Length;
-            public int Version;
-        }
-
+        /// <exception cref="InvalidDataException">
+        /// Not a Source BSP, or a version or lump layout that is not read: see <see cref="BspHeader"/>.
+        /// </exception>
         public static BspFile Load(string path)
         {
             var bsp = new BspFile();
             using var stream = File.OpenRead(path);
             using var r = new BinaryReader(stream, Encoding.ASCII);
-            bsp.Read(r);
+            bsp.Read(r, path);
             return bsp;
         }
 
-        private void Read(BinaryReader r)
+        private void Read(BinaryReader r, string path)
         {
-            int ident = r.ReadInt32();
-            if (ident != 0x50534256) // 'VBSP' little-endian
-                throw new InvalidDataException($"Not a Source BSP: ident 0x{ident:X8}");
-
-            Version = r.ReadInt32();
-
-            for (int i = 0; i < HeaderLumps; i++)
-            {
-                lumps[i] = new LumpEntry
-                {
-                    Offset = r.ReadInt32(),
-                    Length = r.ReadInt32(),
-                    Version = r.ReadInt32(),
-                };
-                r.ReadInt32(); // fourCC, only meaningful for compressed lumps
-            }
-
-            MapRevision = r.ReadInt32();
+            header = BspHeader.Read(r, path);
+            Version = header.Version;
+            MapRevision = header.MapRevision;
 
             EntityLump = ReadLumpString(r, LumpEntities);
             Planes = ReadLumpArray(r, LumpPlanes, Plane.SizeOf, Plane.Read);
@@ -102,19 +83,15 @@ namespace SourceKit
 
         private string ReadLumpString(BinaryReader r, int index)
         {
-            var lump = lumps[index];
-            if (lump.Length <= 0) return string.Empty;
+            var bytes = header.ReadLump(r, index);
+            if (bytes.Length == 0) return string.Empty;
 
-            var bytes = LzmaLump.Read(r, lump.Offset, lump.Length);
             return Encoding.ASCII.GetString(bytes).TrimEnd('\0');
         }
 
         private T[] ReadLumpArray<T>(BinaryReader r, int index, int elementSize, Func<BinaryReader, T> read)
         {
-            var lump = lumps[index];
-            if (lump.Length <= 0) return [];
-
-            var bytes = LzmaLump.Read(r, lump.Offset, lump.Length);
+            var bytes = header.ReadLump(r, index);
             int count = bytes.Length / elementSize;
             var items = new T[count];
 
@@ -132,13 +109,10 @@ namespace SourceKit
         /// </summary>
         private string[] ReadMaterialNames(BinaryReader r)
         {
-            var tableLump = lumps[LumpTexdataStringTable];
-            var dataLump = lumps[LumpTexdataStringData];
-
-            if (tableLump.Length <= 0 || dataLump.Length <= 0)
+            if (header[LumpTexdataStringTable].Length <= 0 || header[LumpTexdataStringData].Length <= 0)
                 return [];
 
-            var tableBytes = LzmaLump.Read(r, tableLump.Offset, tableLump.Length);
+            var tableBytes = header.ReadLump(r, LumpTexdataStringTable);
             int count = tableBytes.Length / sizeof(int);
             var offsets = new int[count];
 
@@ -149,7 +123,7 @@ namespace SourceKit
                     offsets[i] = lr.ReadInt32();
             }
 
-            var blob = LzmaLump.Read(r, dataLump.Offset, dataLump.Length);
+            var blob = header.ReadLump(r, LumpTexdataStringData);
 
             var names = new string[count];
             for (int i = 0; i < count; i++)
